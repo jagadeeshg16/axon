@@ -1,0 +1,7 @@
+logs/
+~/ai-chats/
+hooks/opencode/plugin/dist/
+hooks/opencode/plugin/node_modules/
+*.db
+*.db-shm
+*.db-wal
