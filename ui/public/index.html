@@ -34,7 +34,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
 
 /* ── PAGES ── */
 #pages{overflow:hidden;display:flex;flex-direction:column;min-height:0;flex:1}
-.page{display:none;flex:1;overflow:hidden;min-height:0}
+.page{display:none;flex:1;overflow:hidden;min-height:0;position:relative}
 .page.on{display:flex;flex:1}
 #page-settings{flex-direction:column}
 
@@ -96,6 +96,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
 .ib-time{font-size:9px;color:var(--dim)}
 .ib.claude:hover{border-color:var(--claude);color:var(--claude);background:color-mix(in srgb,var(--claude) 8%,transparent)}
 .ib.opencode:hover{border-color:var(--opencode);color:var(--opencode);background:color-mix(in srgb,var(--opencode) 8%,transparent)}
+.ib.codex:hover{border-color:var(--codex);color:var(--codex);background:color-mix(in srgb,var(--codex) 8%,transparent)}
 .ib.copilot:hover{border-color:var(--copilot);color:var(--copilot);background:color-mix(in srgb,var(--copilot) 8%,transparent)}
 .ib:disabled{opacity:.3;cursor:not-allowed;pointer-events:none}
 
@@ -198,6 +199,17 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
 .am-btn:disabled{opacity:.3;cursor:not-allowed}
 .am-stat{font-family:var(--mono);font-size:10px;color:var(--muted)}
 .mcp-server-path{background:var(--s2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:8px;word-break:break-all}
+.mcp-hit-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
+@media(max-width:700px){.mcp-hit-grid{grid-template-columns:repeat(2,1fr)}}
+.mcp-hit-card{background:var(--s1);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+.mcp-hit-v{font-family:var(--mono);font-size:18px;font-weight:800;color:var(--text);line-height:1}
+.mcp-hit-l{font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:5px}
+.mcp-hit-list{display:flex;flex-direction:column;gap:5px}
+.mcp-hit-row{background:var(--s1);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:10px;color:var(--muted);display:flex;gap:8px;align-items:flex-start}
+.mcp-hit-row-main{flex:1;min-width:0}
+.mcp-hit-row-title{color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mcp-hit-row-sub{color:var(--dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mcp-hit-empty{font-family:var(--mono);font-size:10px;color:var(--dim);padding:10px;background:var(--s1);border:1px solid var(--border);border-radius:6px}
 
 /* ── USAGE PAGE ── */
 #page-usage{flex-direction:column;overflow-y:auto}
@@ -363,6 +375,10 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
 
 /* ── SHARED ── */
 #loading{flex:1;display:flex;align-items:center;justify-content:center}
+.page-loading{position:absolute;inset:0;z-index:40;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.74);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
+.page-loading.on{display:flex}
+.page-loading-box{display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--s1);border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.45);font-family:var(--mono);font-size:11px;color:var(--muted)}
+.page-loading-msg{white-space:nowrap}
 .spin{width:16px;height:16px;border:2px solid var(--border2);border-top-color:var(--muted);border-radius:50%;animation:sp .55s linear infinite;display:inline-block}
 @keyframes sp{to{transform:rotate(360deg)}}
 #toast{position:fixed;bottom:20px;right:20px;padding:10px 16px;background:var(--s3);border:1px solid var(--border2);border-radius:8px;font-family:var(--mono);font-size:11px;color:var(--text);box-shadow:0 8px 30px rgba(0,0,0,.6);opacity:0;transform:translateY(8px);transition:all .18s;pointer-events:none;z-index:999;display:flex;align-items:center;gap:8px}
@@ -417,6 +433,10 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
             <button class="ib opencode" id="ib-opencode" onclick="doImport('opencode')">
               <span class="ib-label"><span class="ib-dot" style="background:var(--opencode)"></span>↓ OpenCode</span>
               <span class="ib-time" id="ib-time-opencode">never</span>
+            </button>
+            <button class="ib codex" id="ib-codex" onclick="doImport('codex')">
+              <span class="ib-label"><span class="ib-dot" style="background:var(--codex)"></span>↓ Codex</span>
+              <span class="ib-time" id="ib-time-codex">never</span>
             </button>
             <button class="ib copilot"  id="ib-copilot"  onclick="doImport('copilot')">
               <span class="ib-label"><span class="ib-dot" style="background:var(--copilot)"></span>↓ Copilot</span>
@@ -621,11 +641,11 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
     <div class="page" id="page-insights" style="display:none;overflow-y:auto;flex-direction:column">
       <div class="usage-inner">
 
-        <!-- Copilot connection status -->
+        <!-- Insights provider status -->
         <div class="ins-connect-bar" id="ins-connect-bar">
           <div class="ins-connect-status" id="ins-connect-status">
             <div class="ins-conn-dot" id="ins-conn-dot"></div>
-            <span id="ins-conn-label">Checking GitHub Copilot…</span>
+            <span id="ins-conn-label">Checking Insights providers…</span>
           </div>
           <button class="ins-run-btn" id="ins-conn-btn" onclick="startCopilotConnect()" style="display:none">Connect GitHub Copilot</button>
         </div>
@@ -640,7 +660,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
         <!-- Controls: model selector + run button + backfill -->
         <div class="ins-controls">
           <select class="ins-model-sel" id="ins-model-sel" onchange="saveInsightsModel(this.value)">
-            <option value="">Loading models…</option>
+            <option value="">Loading provider models…</option>
           </select>
           <button class="ins-run-btn" id="ins-run-btn" onclick="triggerInsightsRun()">
             <span id="ins-run-label">▶ Run Analysis</span>
@@ -725,6 +745,20 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
         </div>
 
         <div class="settings-section">
+          <div class="settings-h2">MCP Usage</div>
+          <div class="mcp-hit-grid">
+            <div class="mcp-hit-card"><div class="mcp-hit-v" id="mcp-hit-total">—</div><div class="mcp-hit-l">Total hits</div></div>
+            <div class="mcp-hit-card"><div class="mcp-hit-v" id="mcp-hit-24h">—</div><div class="mcp-hit-l">Last 24h</div></div>
+            <div class="mcp-hit-card"><div class="mcp-hit-v" id="mcp-hit-context">—</div><div class="mcp-hit-l">Context loads</div></div>
+            <div class="mcp-hit-card"><div class="mcp-hit-v" id="mcp-hit-search">—</div><div class="mcp-hit-l">Search/list calls</div></div>
+          </div>
+          <div class="settings-h2" style="margin-top:14px">Top Loaded Context</div>
+          <div class="mcp-hit-list" id="mcp-hit-top-list"><div class="mcp-hit-empty">Loading...</div></div>
+          <div class="settings-h2" style="margin-top:14px">Recent MCP Hits</div>
+          <div class="mcp-hit-list" id="mcp-hit-list"><div class="mcp-hit-empty">Loading...</div></div>
+        </div>
+
+        <div class="settings-section">
           <div class="settings-h2">Tool Integrations</div>
 
           <div class="tool-int-row">
@@ -777,7 +811,8 @@ const T={
   codex:{label:'Codex',s:'CD',c:'var(--codex)'},
   copilot:{label:'Copilot',s:'GH',c:'var(--copilot)'},
 }
-const MCP_SERVER_PATH = '/home/jagadeesh-12581/tools/axon/mcp/server.js'
+var API_TOKEN = "__AXON_UI_TOKEN__"
+var MCP_SERVER_PATH = "__MCP_SERVER_PATH__"
 
 let S={
   sessions:[],
@@ -786,13 +821,20 @@ let S={
   feedHistory:{},
 }
 
+let ACTIVE_PAGE="mcp"
+let _sessionShellPromise=null
+const PAGE_LABELS={mcp:"MCP",port:"Port",usage:"Usage",insights:"Insights",settings:"Settings"}
+const PREFETCH={mcp:null,port:null,usage:null,insights:null,settings:null}
+
 function rt(ts){const d=Date.now()-new Date(ts).getTime(),m=~~(d/6e4),h=~~(m/60),dy=~~(h/24);return m<1?'now':m<60?`${m}m`:h<24?`${h}h`:`${dy}d`}
 function sd(ts){return new Date(ts).toLocaleDateString('en',{month:'short',day:'numeric'})}
-function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function localDateKey(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;')}
 function sdir(d){return d?(d.replace(/^\/home\/[^/]+/,'~').slice(-40)||d):''}
 
-async function api(url,opts){
-  const r=await fetch(url,opts)
+async function api(url,opts={}){
+  const headers={...(opts.headers||{}),'X-Axon-Token':API_TOKEN}
+  const r=await fetch(url,{...opts,headers})
   if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.error||'failed')}
   return r.json()
 }
@@ -803,6 +845,54 @@ function toast(msg,type='ok'){
   el.className='show'+(type==='err'?' err':'')
   el.innerHTML=type==='ok'?`<span class="tok">✓</span> ${msg}`:`<span>✗</span> ${msg}`
   clearTimeout(tTimer);tTimer=setTimeout(()=>el.classList.remove('show'),3000)
+}
+
+function ensurePageLoader(page){
+  const pageEl=document.getElementById("page-"+page)
+  if(!pageEl)return null
+  let loader=pageEl.querySelector(":scope > .page-loading")
+  if(!loader){
+    loader=document.createElement("div")
+    loader.className="page-loading"
+    loader.innerHTML=`<div class="page-loading-box"><span class="spin"></span><span class="page-loading-msg">Loading...</span></div>`
+    pageEl.appendChild(loader)
+  }
+  return loader
+}
+
+function setPageLoading(page,on,msg){
+  const loader=ensurePageLoader(page)
+  if(!loader)return
+  const label=msg||`Loading ${PAGE_LABELS[page]||page}...`
+  const text=loader.querySelector(".page-loading-msg")
+  if(text)text.textContent=label
+  loader.classList.toggle("on",!!on)
+}
+
+function prefetchPage(page,{force=false}={}){
+  if(!force&&PREFETCH[page])return PREFETCH[page]
+  const label=PAGE_LABELS[page]||page
+  const promise=(async()=>{
+    setPageLoading(page,true,`Loading ${label}...`)
+    try{
+      if(page==="mcp"||page==="port")return await loadSessionShell(force)
+      if(page==="usage")return await loadUsage(force)
+      if(page==="insights")return await loadInsights({loadRecurring:false})
+      if(page==="settings")return await loadSettings()
+    }catch(e){
+      if(ACTIVE_PAGE===page)toast(`${label} load failed: ${e.message}`,"err")
+      throw e
+    }finally{
+      setPageLoading(page,false)
+    }
+  })()
+  PREFETCH[page]=promise
+  promise.catch(()=>{if(PREFETCH[page]===promise)PREFETCH[page]=null})
+  return promise
+}
+
+function prefetchAllTabs(){
+  ;["mcp","port","usage","insights","settings"].forEach(page=>prefetchPage(page).catch(()=>{}))
 }
 
 // ── navigation ────────────────────────────────────────────────────────────────
@@ -816,21 +906,22 @@ function checkExpOverlay(){
 }
 
 function showPage(page){
-  document.querySelectorAll('.page').forEach(p=>{
-    p.classList.remove('on')
-    p.style.display='none'
+  ACTIVE_PAGE=page
+  document.querySelectorAll(".page").forEach(p=>{
+    p.classList.remove("on")
+    p.style.display="none"
   })
-  document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('on'))
+  document.querySelectorAll(".nav-tab").forEach(t=>t.classList.remove("on"))
   const el=document.getElementById(`page-${page}`)
   if(el){
-    el.classList.add('on')
-    el.style.display = 'flex'
+    el.classList.add("on")
+    el.style.display = "flex"
   }
-  document.querySelector(`.nav-tab[data-page=${page}]`)?.classList.add('on')
-  if(page==='settings') loadSettings()
-  if(page==='port') checkExpOverlay()
-  if(page==='usage') loadUsage()
-  if(page==='insights') loadInsights()
+  document.querySelector(`.nav-tab[data-page=${page}]`)?.classList.add("on")
+  if(page==="port") checkExpOverlay()
+  prefetchPage(page).then(()=>{
+    if(page==="insights"&&ACTIVE_PAGE==="insights"&&_insAllRecords.length)renderInsightsRecurring()
+  }).catch(()=>{})
 }
 
 // ── filters ───────────────────────────────────────────────────────────────────
@@ -911,7 +1002,7 @@ function renderMcp(){
       <span class="badge ${p.to_tool}" style="margin-right:6px">${(p.to_tool).toUpperCase()}</span>
       <span style="color:${tc}">${lbl}</span>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;margin-top:4px;cursor:pointer;font-size:10px;word-break:break-all"
-           onclick="cp(this,'${esc(cmd)}')" title="click to copy">$ ${esc(cmd)}</div>
+           data-cmd="${esc(cmd)}" onclick="cp(this,this.dataset.cmd)" title="click to copy">$ ${esc(cmd)}</div>
     </div>`
   }).join('')
 
@@ -932,7 +1023,7 @@ function renderMcp(){
         <div class="mcp-prompt-label">MCP Context Prompt — click to copy</div>
         <div class="mcp-prompt-text" onclick="copyMcpPrompt(this)">${esc(mcpPrompt)}</div>
         <div class="mcp-actions">
-          <button class="mcp-btn feed${isFed?' done':''}" onclick="feedSession('${active.id}','${active.tool}',this)">
+          <button class="mcp-btn feed${isFed?' done':''}" data-id="${esc(active.id)}" data-tool="${esc(active.tool)}" onclick="feedSession(this.dataset.id,this.dataset.tool,this)">
             ${isFed?'✦ In AgentMemory':'Feed to AgentMemory'}
           </button>
           <span style="font-family:var(--mono);font-size:9px;color:var(--dim);line-height:1;align-self:center">
@@ -987,7 +1078,7 @@ function renderPort(){
         <span style="color:${tc};font-size:10px">${lbl}</span>
         <span class="pb-copy-hint">click to copy</span>
       </div>
-      <div class="pb-cmd" onclick="cp(this,'${esc(cmd)}')">${esc(cmd)}</div>
+      <div class="pb-cmd" data-cmd="${esc(cmd)}" onclick="cp(this,this.dataset.cmd)">${esc(cmd)}</div>
     </div>`
   }).join('')
 
@@ -1058,32 +1149,59 @@ function showSource(src){
 
 // ── Insights ──────────────────────────────────────────────────────────────────
 const INSIGHTS_MODEL_KEY='axon-insights-model'
+const PROVIDER_LABELS={copilot:'GitHub Copilot',openai:'OpenAI API',anthropic:'Claude API'}
 let _pollTimer=null
+let _insLegacyRecords=0
+let _insRecurringKey=""
 
-async function loadInsights(){
-  // Check Copilot connection status
-  checkCopilotStatus()
-  // Populate model selector
-  try{
-    const resp=await api('/api/copilot/models')
-    const models=(resp&&resp.models)||resp||[]
-    const sel=document.getElementById('ins-model-sel')
-    const saved=localStorage.getItem(INSIGHTS_MODEL_KEY)||''
-    if(models.length){
-      sel.innerHTML=models.map(m=>`<option value="${m.id}"${m.id===saved?' selected':''}>${m.name||m.id}${m.maxInputTokens?` (${Math.round(m.maxInputTokens/1000)}k ctx)`:''}</option>`).join('')
-      if(!saved)sel.value=models[0].id
-    }else{
-      sel.innerHTML='<option value="">No models available</option>'
-    }
-  }catch(e){
-    document.getElementById('ins-model-sel').innerHTML='<option value="">Copilot unavailable</option>'
-  }
+async function loadInsights({loadRecurring=ACTIVE_PAGE==="insights"}={}){
+  await loadInsightModels()
   // Load history
   try{
     const data=await api('/api/insights-history')
-    renderInsightsView(data.records||[])
+    _insLegacyRecords=data.legacyRecords||0
+    renderInsightsView(data.records||[],{loadRecurring})
   }catch(e){
     document.getElementById('ins-empty').textContent='Failed to load history: '+e.message
+  }
+}
+
+async function loadInsightModels(){
+  const dot=document.getElementById('ins-conn-dot')
+  const lbl=document.getElementById('ins-conn-label')
+  const btn=document.getElementById('ins-conn-btn')
+  const sel=document.getElementById('ins-model-sel')
+  if(dot)dot.className='ins-conn-dot spin-dot'
+  if(lbl)lbl.textContent='Checking Insights providers…'
+  try{
+    const resp=await api('/api/insights/models')
+    const providers=resp.providers||[]
+    const models=resp.models||[]
+    const connected=providers.filter(p=>p.connected)
+    const copilot=providers.find(p=>p.id==='copilot')
+    if(dot)dot.className='ins-conn-dot '+(connected.length?'ok':'err')
+    if(lbl){
+      if(connected.length) lbl.textContent='Ready — '+connected.map(p=>PROVIDER_LABELS[p.id]||p.label||p.id).join(', ')
+      else lbl.textContent='No provider ready — set OPENAI_API_KEY or ANTHROPIC_API_KEY, or connect GitHub Copilot'
+    }
+    if(btn)btn.style.display=copilot&&!copilot.connected?'':'none'
+
+    const saved=localStorage.getItem(INSIGHTS_MODEL_KEY)||''
+    if(models.length){
+      const byProvider=models.reduce((a,m)=>{(a[m.provider]??=[]).push(m);return a},{})
+      sel.innerHTML=Object.entries(byProvider).map(([provider,ms])=>
+        `<optgroup label="${esc(PROVIDER_LABELS[provider]||provider)}">${ms.map(m=>`<option value="${esc(m.id)}"${m.id===saved?' selected':''}>${esc((m.name||m.model||m.id).replace(/^.* · /,''))}${m.maxInputTokens?` (${Math.round(m.maxInputTokens/1000)}k ctx)`:''}</option>`).join('')}</optgroup>`
+      ).join('')
+      sel.value=models.some(m=>m.id===saved)?saved:models[0].id
+      if(!models.some(m=>m.id===saved))localStorage.setItem(INSIGHTS_MODEL_KEY,sel.value)
+    }else{
+      sel.innerHTML='<option value="">No provider models available</option>'
+    }
+  }catch(e){
+    if(dot)dot.className='ins-conn-dot err'
+    if(lbl)lbl.textContent='Provider check failed — '+e.message
+    if(btn)btn.style.display=''
+    if(sel)sel.innerHTML='<option value="">Providers unavailable</option>'
   }
 }
 
@@ -1094,66 +1212,53 @@ function saveInsightsModel(v){
 let _backfillPoll = null
 
 async function triggerBackfill(){
-  const btn=document.getElementById('ins-backfill-btn')
-  const lbl=document.getElementById('ins-backfill-label')
-  const prog=document.getElementById('ins-backfill-progress')
-  const status=document.getElementById('ins-run-status')
+  const btn=document.getElementById("ins-backfill-btn")
+  const lbl=document.getElementById("ins-backfill-label")
+  const prog=document.getElementById("ins-backfill-progress")
+  const status=document.getElementById("ins-run-status")
   btn.disabled=true
-  lbl.textContent='Starting…'
+  lbl.textContent="Starting..."
+  setPageLoading("insights",true,"Starting backfill...")
   try{
-    const model=document.getElementById('ins-model-sel').value
-    const params=model?`?model=${encodeURIComponent(model)}`:''
-    const r=await api('/api/insights/backfill/start'+params,{method:'POST'})
-    if(r.status==='already_running'){ status.textContent='Backfill already running'; btn.disabled=false; lbl.textContent='⟳ Backfill History'; return }
-    prog.style.display=''
-    lbl.textContent='Running…'
-    // Poll status
+    const model=document.getElementById("ins-model-sel").value
+    const params=model?`?model=${encodeURIComponent(model)}`:""
+    const r=await api("/api/insights/backfill/start"+params,{method:"POST"})
+    if(r.status==="already_running"){
+      status.textContent="Backfill already running"
+      btn.disabled=false
+      lbl.textContent="⟳ Backfill History"
+      return
+    }
+    prog.style.display=""
+    lbl.textContent="Running..."
     if(_backfillPoll)clearInterval(_backfillPoll)
     _backfillPoll=setInterval(async()=>{
       try{
-        const s=await api('/api/insights/backfill/status')
+        const s=await api("/api/insights/backfill/status")
         const pct=s.total>0?Math.round(s.done/s.total*100):0
-        document.getElementById('ins-backfill-bar').style.width=pct+'%'
-        document.getElementById('ins-backfill-count').textContent=s.done+'/'+s.total+' days'
-        document.getElementById('ins-backfill-msg').textContent=s.running?'Analyzing sessions…':(s.error?'Error: '+s.error:'Complete!')
+        document.getElementById("ins-backfill-bar").style.width=pct+"%"
+        document.getElementById("ins-backfill-count").textContent=s.done+"/"+s.total+" days"
+        document.getElementById("ins-backfill-msg").textContent=s.running?"Analyzing sessions...":(s.error?"Error: "+s.error:"Complete!")
         if(!s.running){
           clearInterval(_backfillPoll);_backfillPoll=null
-          btn.disabled=false; lbl.textContent='⟳ Backfill History'
-          // Reload history to update graph
-          const hist=await api('/api/insights-history')
+          btn.disabled=false; lbl.textContent="⟳ Backfill History"
+          const hist=await api("/api/insights-history")
+          _insLegacyRecords=hist.legacyRecords||0
           renderInsightsView(hist.records||[])
-          status.textContent='Backfill done — '+s.done+' days processed'
+          status.textContent="Backfill done — "+s.done+" days processed"
         }
       }catch{}
     },3000)
   }catch(e){
-    status.textContent='Error: '+e.message
-    btn.disabled=false; lbl.textContent='⟳ Backfill History'
+    status.textContent="Error: "+e.message
+    btn.disabled=false; lbl.textContent="⟳ Backfill History"
+  }finally{
+    setPageLoading("insights",false)
   }
 }
 
 async function checkCopilotStatus(){
-  const dot=document.getElementById('ins-conn-dot')
-  const lbl=document.getElementById('ins-conn-label')
-  const btn=document.getElementById('ins-conn-btn')
-  if(dot)dot.className='ins-conn-dot spin-dot'
-  if(lbl)lbl.textContent='Checking GitHub Copilot…'
-  try{
-    const s=await api('/api/copilot/status')
-    if(s.connected){
-      if(dot)dot.className='ins-conn-dot ok'
-      if(lbl)lbl.textContent='Connected — GitHub Copilot ready'
-      if(btn)btn.style.display='none'
-    }else{
-      if(dot)dot.className='ins-conn-dot err'
-      if(lbl)lbl.textContent='Not connected — '+( s.reason||'No token found')
-      if(btn)btn.style.display=''
-    }
-  }catch{
-    if(dot)dot.className='ins-conn-dot err'
-    if(lbl)lbl.textContent='Could not check status'
-    if(btn)btn.style.display=''
-  }
+  return loadInsightModels()
 }
 
 async function startCopilotConnect(){
@@ -1200,36 +1305,41 @@ async function startCopilotConnect(){
 }
 
 async function triggerInsightsRun(){
-  const btn=document.getElementById('ins-run-btn')
-  const lbl=document.getElementById('ins-run-label')
-  const status=document.getElementById('ins-run-status')
+  const btn=document.getElementById("ins-run-btn")
+  const lbl=document.getElementById("ins-run-label")
+  const status=document.getElementById("ins-run-status")
   btn.disabled=true
-  lbl.textContent='Analyzing…'
-  status.textContent=''
+  lbl.textContent="Analyzing..."
+  status.textContent=""
+  setPageLoading("insights",true,"Analyzing sessions...")
   try{
-    const model=document.getElementById('ins-model-sel').value
-    const params=model?`?model=${encodeURIComponent(model)}&refresh=1`:'?refresh=1'
-    const result=await api('/api/session-insights'+params)
+    const model=document.getElementById("ins-model-sel").value
+    const params=model?`?model=${encodeURIComponent(model)}&refresh=1`:"?refresh=1"
+    const result=await api("/api/session-insights"+params)
     if(result&&result.error){status.textContent=result.error;return}
-    if(!result){status.textContent='No sessions in window';return}
-    // Reload history to get updated graph
-    const histData=await api('/api/insights-history')
+    if(!result){status.textContent="No sessions in window";return}
+    const histData=await api("/api/insights-history")
+    _insLegacyRecords=histData.legacyRecords||0
     renderInsightsView(histData.records||[])
-    status.textContent='Done — last run: '+new Date().toLocaleTimeString()
+    status.textContent="Done — last run: "+new Date().toLocaleTimeString()
   }catch(e){
-    status.textContent='Error: '+e.message
+    status.textContent="Error: "+e.message
   }finally{
+    setPageLoading("insights",false)
     btn.disabled=false
-    lbl.textContent='▶ Run Analysis'
+    lbl.textContent="▶ Run Analysis"
   }
 }
 
 let _insAllRecords=[]
 
-function renderInsightsView(records){
+function renderInsightsView(records,{loadRecurring=ACTIVE_PAGE==="insights"}={}){
   const empty=document.getElementById('ins-empty')
   if(!records||!records.length){
+    _insAllRecords=[]
+    _insRecurringKey=""
     empty.style.display=''
+    empty.textContent=_insLegacyRecords?`${_insLegacyRecords} legacy Insights records are preserved on disk but hidden because they were generated before the timestamp fix. Run Backfill History to rebuild corrected breakdowns.`:'No insights yet. Run analysis or backfill history.'
     document.getElementById('ins-banner').style.display='none'
     document.getElementById('ins-graph-sh').style.display='none'
     document.getElementById('ins-graph-wrap').style.display='none'
@@ -1244,7 +1354,7 @@ function renderInsightsView(records){
   _insAllRecords=records
   empty.style.display='none'
   renderInsightsGraph(records)
-  renderInsightsRecurring()  // async — loads from server, shows "Analyzing…" while loading
+  if(loadRecurring)renderInsightsRecurring()  // async; model-backed, so skip during background prefetch
   // Default: show latest date
   const dates=Object.keys(records.reduce((a,r)=>{a[r.date||r.ts.slice(0,10)]=1;return a},{})).sort()
   selectInsDay(dates[dates.length-1], false)
@@ -1265,7 +1375,7 @@ function renderInsightsBanner(r){
   wv.textContent=(r.wastePct||0)+'%'
   wv.style.color=(r.wastePct||0)>40?'#FF4444':(r.wastePct||0)>20?'#FFB800':'#39FF14'
   document.getElementById('ins-sess-val').textContent=r.sessions||0
-  const mname=r.model||'—'
+  const mname=r.modelName||r.model||'—'
   document.getElementById('ins-model-val').textContent=mname.length>20?mname.slice(0,18)+'…':mname
   document.getElementById('ins-summary-text').textContent=r.summary||''
 }
@@ -1344,7 +1454,7 @@ function selectInsDay(date, scroll){
   renderInsightsBanner(latest)
   document.getElementById('ins-banner').style.display=''
   // Label
-  const today=new Date().toISOString().slice(0,10)
+  const today=localDateKey()
   const label=date===today?' — Today':` — ${date.slice(5).replace('-','/')}`
   document.getElementById('ins-day-sel-label').textContent=label
   document.getElementById('ins-sess-day-label').textContent=label
@@ -1362,18 +1472,24 @@ function selectInsDay(date, scroll){
 }
 
 async function renderInsightsRecurring(){
-  const sh=document.getElementById('ins-recurring-sh')
-  const el=document.getElementById('ins-recurring-patterns')
-  sh.style.display=''
-  el.innerHTML='<span style="font-family:var(--mono);font-size:10px;color:var(--dim)">Analyzing patterns…</span>'
+  const sh=document.getElementById("ins-recurring-sh")
+  const el=document.getElementById("ins-recurring-patterns")
+  if(!sh||!el)return
+  const model=document.getElementById("ins-model-sel")?.value||""
+  const last=_insAllRecords[_insAllRecords.length-1]||{}
+  const key=`${model}:${_insAllRecords.length}:${last.ts||last.date||""}`
+  if(_insRecurringKey===key&&el.innerHTML.trim())return
+  _insRecurringKey=key
+  sh.style.display=""
+  el.innerHTML=`<span style="font-family:var(--mono);font-size:10px;color:var(--dim)">Analyzing patterns...</span>`
   try{
-    const resp=await fetch('/api/insights/recurring-themes')
-    const data=await resp.json()
+    const data=await api("/api/insights/recurring-themes"+(model?"?model="+encodeURIComponent(model):""))
     const themes=data.themes||[]
-    if(!themes.length){sh.style.display='none';el.innerHTML='';return}
-    el.innerHTML=themes.map(t=>`<div class="ins-recurring-pill">${escHtml(t)}</div>`).join('')
+    if(!themes.length){sh.style.display="none";el.innerHTML="";return}
+    el.innerHTML=themes.map(t=>`<div class="ins-recurring-pill">${escHtml(t)}</div>`).join("")
   }catch{
-    sh.style.display='none';el.innerHTML=''
+    _insRecurringKey=""
+    sh.style.display="none";el.innerHTML=""
   }
 }
 
@@ -1382,7 +1498,7 @@ function renderInsightsPatterns(patterns){
   const el=document.getElementById('ins-patterns')
   if(!patterns||!patterns.length){sh.style.display='none';el.innerHTML='';return}
   sh.style.display=''
-  el.innerHTML=patterns.map(p=>`<div class="ins-pill">${p}</div>`).join('')
+  el.innerHTML=patterns.map(p=>`<div class="ins-pill">${escHtml(p)}</div>`).join('')
 }
 
 function renderInsightsSessions(sessions){
@@ -1393,7 +1509,8 @@ function renderInsightsSessions(sessions){
   el.innerHTML=sessions.map((s,i)=>{
     const sc=s.score||0
     const scoreColor=sc>=7?'#39FF14':sc>=4?'#FFB800':'#FF4444'
-    const toolBadge=s.tool?`<span class="badge ${s.tool}">${s.tool}</span>`:''
+    const toolKey=T[s.tool]?s.tool:''
+    const toolBadge=toolKey?`<span class="badge ${toolKey}">${escHtml(toolKey)}</span>`:''
     return`<div class="ins-card" id="ins-card-${i}">
   <div class="ins-card-head" onclick="toggleInsCard(${i})">
     ${toolBadge}
@@ -1440,10 +1557,11 @@ function filterByRange(daily){
 }
 
 async function refreshUsage(){
-  const btn=document.getElementById('usage-refresh-btn')
-  if(btn)btn.textContent='...'
-  await loadUsage(true)
-  if(btn)btn.textContent='↻'
+  const btn=document.getElementById("usage-refresh-btn")
+  if(btn)btn.textContent="..."
+  PREFETCH.usage=null
+  try{await prefetchPage("usage",{force:true})}
+  finally{if(btn)btn.textContent="↻"}
 }
 
 async function loadUsage(force=false){
@@ -1778,6 +1896,54 @@ function renderChart(daily){
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
+function renderMcpHits(data){
+  const byName=Object.fromEntries((data.byName||[]).map(x=>[x.name,x.count]))
+  const context=(data.byName||[]).filter(x=>/get_session|get_prompt|read_resource:session/.test(x.name)).reduce((a,x)=>a+x.count,0)
+  const discovery=(data.byName||[]).filter(x=>/list_sessions|search_sessions|list_resources|sessions:\/\/recent/.test(x.name)).reduce((a,x)=>a+x.count,0)
+  const set=(id,val)=>{const el=document.getElementById(id);if(el)el.textContent=val}
+  set("mcp-hit-total",(data.total||0).toLocaleString())
+  set("mcp-hit-24h",(data.last24h||0).toLocaleString())
+  set("mcp-hit-context",context.toLocaleString())
+  set("mcp-hit-search",discovery.toLocaleString())
+
+  const top=document.getElementById("mcp-hit-top-list")
+  if(top){
+    const rows=data.topSessions||[]
+    top.innerHTML=rows.length?rows.map(s=>{
+      const hash=s.content_hash?` · hash ${esc(s.content_hash)}`:""
+      const mt=s.source_mtime?` · mtime ${esc(new Date(s.source_mtime).toLocaleString())}`:""
+      return `<div class="mcp-hit-row">
+        <span class="badge ${esc(s.tool)}" style="font-size:8px;padding:1px 5px">${esc(String(s.tool||"??").slice(0,2).toUpperCase())}</span>
+        <div class="mcp-hit-row-main">
+          <div class="mcp-hit-row-title">${esc(s.session_id||"unknown")} · ${s.hits||0} hit${s.hits===1?"":"s"}</div>
+          <div class="mcp-hit-row-sub">${esc(s.preview||s.directory||"")}${hash}${mt}</div>
+        </div>
+      </div>`
+    }).join(""):"<div class=\"mcp-hit-empty\">No context loads yet</div>"
+  }
+
+  const list=document.getElementById("mcp-hit-list")
+  if(list){
+    const rows=data.recent||[]
+    list.innerHTML=rows.length?rows.map(h=>{
+      const sess=h.session||{}
+      const id=h.session_id||sess.session_id||""
+      const resultCount=Number.isFinite(h.count)?` · ${h.count} result${h.count===1?"":"s"}`:""
+      const hash=sess.content_hash?` · hash ${esc(sess.content_hash)}`:""
+      const results=Array.isArray(h.results)&&h.results.length?` · returned ${h.results.map(r=>`${r.tool}:${String(r.session_id||"").slice(-8)}`).join(", ")}`:""
+      const q=h.query_hash?` · q:${esc(h.query_hash)}`:(h.search_hash?` · search:${esc(h.search_hash)}`:"")
+      const title=[h.kind,h.name,h.uri||h.prompt].filter(Boolean).join(":")
+      return `<div class="mcp-hit-row">
+        <span class="badge ${esc(h.tool||sess.tool||"opencode")}" style="font-size:8px;padding:1px 5px">${esc(String(h.tool||sess.tool||"all").slice(0,2).toUpperCase())}</span>
+        <div class="mcp-hit-row-main">
+          <div class="mcp-hit-row-title">${esc(title||"mcp")} ${id?`· ${esc(id)}`:""}</div>
+          <div class="mcp-hit-row-sub">${esc(new Date(h.ts).toLocaleString())} · ${esc(h.result||"ok")}${resultCount}${hash}${q}${results}</div>
+        </div>
+      </div>`
+    }).join(""):"<div class=\"mcp-hit-empty\">No MCP hits recorded yet</div>"
+  }
+}
+
 async function loadSettings(){
   // MCP server path
   const pathEl=document.getElementById('mcp-path')
@@ -1808,6 +1974,14 @@ async function loadSettings(){
         </div>`).join('')
     }
   }catch(e){console.error(e)}
+
+  // MCP hit audit summary
+  try{
+    const hits=await api("/api/mcp/hits")
+    renderMcpHits(hits)
+  }catch{
+    renderMcpHits({total:0,last24h:0,byName:[],topSessions:[],recent:[]})
+  }
 
   // Tool integrations status (ccusage + agentmemory)
   try{
@@ -1895,9 +2069,12 @@ async function feedSession(id,tool,btn){
 // ── Sync / Import ─────────────────────────────────────────────────────────────
 function renderSyncState(state){
   const fmt=ts=>{if(!ts)return'never';const d=new Date(ts);return d.toLocaleDateString('en',{month:'short',day:'numeric'})+' '+d.toLocaleTimeString('en',{hour:'2-digit',minute:'2-digit'})}
-  for(const t of['claude','opencode','copilot']){
+  for(const t of['claude','opencode','codex','copilot']){
     const el=document.getElementById(`ib-time-${t}`)
-    if(el)el.textContent=fmt(state[t]?.last_sync)
+    if(!el)continue
+    const available=state[t]?.available
+    const when=fmt(state[t]?.last_sync)
+    el.textContent=Number.isFinite(available)?`${available} available · ${when}`:when
   }
 }
 
@@ -1909,8 +2086,12 @@ async function doImport(tool){
   if(btn){const lbl=btn.querySelector('.ib-label');if(lbl)lbl.innerHTML=`<span class="spin" style="width:9px;height:9px;border-width:1.5px"></span> syncing...`}
   try{
     const res=await api('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool,full})})
-    const n=Object.values(res).reduce((a,r)=>a+(r.imported||0),0)
-    toast(`${T[tool]?.label??tool}: ${n} imported`)
+    const rows=Object.values(res)
+    const n=rows.reduce((a,r)=>a+(r.imported||0),0)
+    const available=rows.reduce((a,r)=>a+(r.available||0),0)
+    const found=rows.reduce((a,r)=>a+(r.source_found||0),0)
+    const extra=available?` · ${available} available`:found?` · ${found} source histories checked`:''
+    toast(`${T[tool]?.label??tool}: ${n} new this run${extra}`)
     S.sessions=await api('/api/sessions')
     const state=await api('/api/sync-state')
     renderSyncState(state);renderList('mcp');renderList('port')
@@ -1919,22 +2100,31 @@ async function doImport(tool){
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-async function init(){
-  try{
-    const [sessions,state,fh]=await Promise.all([
-      api('/api/sessions'),api('/api/sync-state'),api('/api/feed/status')
-    ])
-    S.sessions=sessions
-    S.feedHistory=fh
-    document.getElementById('total-badge').textContent=`${sessions.length} sessions`
-    renderSyncState(state)
-    renderList('mcp');renderList('port')
-  }catch(e){
-    document.getElementById('total-badge').textContent='error'
-    toast('failed to load','err')
-  }
+async function loadSessionShell(force=false){
+  if(_sessionShellPromise&&!force)return _sessionShellPromise
+  const promise=(async()=>{
+    try{
+      const [sessions,state,fh]=await Promise.all([
+        api("/api/sessions"),api("/api/sync-state"),api("/api/feed/status")
+      ])
+      S.sessions=sessions
+      S.feedHistory=fh
+      document.getElementById("total-badge").textContent=`${sessions.length} sessions`
+      renderSyncState(state)
+      renderList("mcp");renderList("port")
+      return {sessions,state,feedHistory:fh}
+    }catch(e){
+      document.getElementById("total-badge").textContent="error"
+      toast("failed to load","err")
+      throw e
+    }
+  })()
+  _sessionShellPromise=promise
+  try{return await promise}
+  catch(e){if(_sessionShellPromise===promise)_sessionShellPromise=null;throw e}
 }
-init()
+
+prefetchAllTabs()
 checkExpOverlay()
 </script>
 </body>

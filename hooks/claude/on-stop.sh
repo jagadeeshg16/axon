@@ -38,8 +38,8 @@ fi
 # ── parse project-format JSONL ────────────────────────────────────────────────
 
 file=$(session_file "claude" "$session_id")
-> "$file"
 mkdir -p "$(dirname "$file")"
+> "$file"
 
 python3 - "$src" "$session_id" <<'PY'
 import sys, json

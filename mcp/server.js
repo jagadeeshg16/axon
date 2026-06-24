@@ -19,10 +19,12 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 import fs   from "fs"
 import path from "path"
+import { createHash } from "crypto"
 
 const LOG_DIR      = process.env.AI_CHAT_LOG_DIR ?? path.join(process.env.HOME, "ai-chats")
 const SESSIONS_DIR = path.join(LOG_DIR, "sessions")
 const DIRS_FILE    = path.join(LOG_DIR, "session-dirs.json")
+const MCP_HITS_FILE = path.join(LOG_DIR, "mcp-hits.jsonl")
 
 const TOOLS = {
   claude:   { label: "Claude Code" },
@@ -46,6 +48,44 @@ function loadDirs() {
   try { return JSON.parse(fs.readFileSync(DIRS_FILE, "utf8")) } catch { return {} }
 }
 
+function recordMcpHit(event) {
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true })
+    const record = { ts: new Date().toISOString(), ...event }
+    fs.appendFileSync(MCP_HITS_FILE, JSON.stringify(record) + "\n")
+  } catch {}
+}
+
+function shortHash(text) {
+  return createHash("sha256").update(String(text ?? "")).digest("hex").slice(0, 16)
+}
+
+function parseJSONLText(text) {
+  return text.split("\n").filter(Boolean)
+    .map(l => { try { return JSON.parse(l) } catch { return null } })
+    .filter(Boolean)
+}
+
+function sessionAuditMeta(session) {
+  if (!session) return null
+  return {
+    tool: session.tool,
+    session_id: session.id,
+    directory: session.directory ?? null,
+    message_count: session.message_count ?? null,
+    ts_start: session.ts ?? null,
+    ts_last: session.last_ts ?? null,
+    source_mtime: session.source_mtime ?? null,
+    content_hash: session.content_hash ?? null,
+    preview: session.preview ?? null,
+    relevance_score: session.relevance_score ?? undefined,
+  }
+}
+
+function resultAuditList(items, limit = 10) {
+  return (items || []).slice(0, limit).map(sessionAuditMeta)
+}
+
 function listSessions(toolFilter, searchQuery, limit = 50) {
   if (!fs.existsSync(SESSIONS_DIR)) return []
   const dirs = loadDirs()
@@ -56,10 +96,13 @@ function listSessions(toolFilter, searchQuery, limit = 50) {
       const [tool, ...rest] = f.replace(".jsonl", "").split("-")
       const id = rest.join("-")
       if (toolFilter && tool !== toolFilter) return null
-      const msgs = readJSONL(path.join(SESSIONS_DIR, f))
+      const fpath = path.join(SESSIONS_DIR, f)
+      const msgs = readJSONL(fpath)
       if (!msgs.length) return null
+      const stat = fs.statSync(fpath)
       const first = msgs[0]
-      const preview = (first.content ?? "").slice(0, 150)
+      const last = msgs[msgs.length - 1]
+      const preview = (msgs.find(m => m.role === "user")?.content ?? first.content ?? "").slice(0, 150)
       if (searchQuery) {
         const q = searchQuery.toLowerCase()
         const haystack = (preview + " " + id + " " + (dirs[`${tool}-${id}`] ?? "")).toLowerCase()
@@ -71,25 +114,30 @@ function listSessions(toolFilter, searchQuery, limit = 50) {
         directory: dirs[`${tool}-${id}`] ?? null,
         message_count: msgs.length,
         ts: first.ts,
+        last_ts: last?.ts ?? first.ts,
+        source_mtime: new Date(stat.mtimeMs).toISOString(),
         tool_label: TOOLS[tool]?.label ?? tool,
       }
     })
     .filter(Boolean)
-    .sort((a, b) => new Date(b.ts) - new Date(a.ts))
+    .sort((a, b) => new Date(b.last_ts ?? b.ts) - new Date(a.last_ts ?? a.ts))
     .slice(0, limit)
 }
 
 function getSession(id, tool) {
   const file = path.join(SESSIONS_DIR, `${tool}-${id}.jsonl`)
   if (!fs.existsSync(file)) return null
-  const msgs = readJSONL(file)
+  const raw = fs.readFileSync(file, "utf8")
+  const msgs = parseJSONLText(raw)
+  const stat = fs.statSync(file)
   const dirs = loadDirs()
   const dir  = dirs[`${tool}-${id}`] ?? null
+  const firstUser = msgs.find(m => m.role === "user")?.content ?? msgs[0]?.content ?? ""
 
   const text = msgs.map(m => {
     const role = m.role === "user" ? "User" : `${TOOLS[tool]?.label ?? tool} (AI)`
     return `**${role}:** ${m.content}`
-  }).join("\n\n")
+  }).join("\\n\\n")
 
   return {
     id, tool,
@@ -97,6 +145,10 @@ function getSession(id, tool) {
     directory: dir,
     message_count: msgs.length,
     ts: msgs[0]?.ts,
+    last_ts: msgs[msgs.length - 1]?.ts ?? msgs[0]?.ts,
+    source_mtime: new Date(stat.mtimeMs).toISOString(),
+    content_hash: shortHash(raw),
+    preview: firstUser.slice(0, 150),
     conversation: text,
     messages: msgs,
   }
@@ -113,8 +165,10 @@ function searchSessions(query, toolFilter, limit = 20) {
     const id = rest.join("-")
     if (toolFilter && tool !== toolFilter) continue
 
-    const msgs = readJSONL(path.join(SESSIONS_DIR, f))
+    const fpath = path.join(SESSIONS_DIR, f)
+    const msgs = readJSONL(fpath)
     if (!msgs.length) continue
+    const stat = fs.statSync(fpath)
 
     // Score: count query occurrences across all messages
     let score = 0
@@ -139,12 +193,14 @@ function searchSessions(query, toolFilter, limit = 20) {
       preview: matchSnippet || msgs[0]?.content?.slice(0, 120),
       message_count: msgs.length,
       ts: msgs[0]?.ts,
+      last_ts: msgs[msgs.length - 1]?.ts ?? msgs[0]?.ts,
+      source_mtime: new Date(stat.mtimeMs).toISOString(),
       relevance_score: score,
     })
   }
 
   return results
-    .sort((a, b) => b.relevance_score - a.relevance_score)
+    .sort((a, b) => b.relevance_score - a.relevance_score || new Date(b.last_ts ?? b.ts) - new Date(a.last_ts ?? a.ts))
     .slice(0, limit)
 }
 
@@ -204,6 +260,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (name === "list_sessions") {
     const sessions = listSessions(args.tool, args.search, args.limit ?? 20)
+    recordMcpHit({ kind: "tool", name, tool: args.tool ?? null, limit: args.limit ?? 20, has_search: !!args.search, search_hash: args.search ? shortHash(args.search) : null, result: "ok", count: sessions.length, results: resultAuditList(sessions) })
     if (!sessions.length) {
       return { content: [{ type: "text", text: "No sessions found." }] }
     }
@@ -215,6 +272,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (name === "get_session") {
     const session = getSession(args.id, args.tool)
+    recordMcpHit({ kind: "tool", name, tool: args.tool ?? null, session_id: args.id ?? null, result: session ? "hit" : "miss", session: sessionAuditMeta(session) })
     if (!session) {
       return { content: [{ type: "text", text: `Session ${args.id} (${args.tool}) not found.` }], isError: true }
     }
@@ -224,6 +282,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (name === "search_sessions") {
     const results = searchSessions(args.query, args.tool, args.limit ?? 10)
+    recordMcpHit({ kind: "tool", name, tool: args.tool ?? null, limit: args.limit ?? 10, has_query: !!args.query, query_len: String(args.query ?? "").length, query_hash: args.query ? shortHash(args.query) : null, result: "ok", count: results.length, results: resultAuditList(results) })
     if (!results.length) {
       return { content: [{ type: "text", text: `No sessions found matching "${args.query}".` }] }
     }
@@ -240,6 +299,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
   const sessions = listSessions(null, null, 30)
+  recordMcpHit({ kind: "resource", name: "list_resources", result: "ok", count: sessions.length + 1, results: resultAuditList(sessions) })
   return {
     resources: [
       {
@@ -263,6 +323,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
 
   if (uri === "sessions://recent") {
     const sessions = listSessions(null, null, 30)
+    recordMcpHit({ kind: "resource", name: "read_resource", uri: "sessions://recent", result: "hit", count: sessions.length, results: resultAuditList(sessions) })
     const text = sessions.map(s =>
       `[${s.tool_label}] ${s.id} — ${s.preview.slice(0, 100)} (${s.ts?.slice(0,10)})`
     ).join("\n")
@@ -273,6 +334,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
   if (match) {
     const [, tool, id] = match
     const session = getSession(id, tool)
+    recordMcpHit({ kind: "resource", name: "read_resource", uri: "session", tool, session_id: id, result: session ? "hit" : "miss", session: sessionAuditMeta(session) })
     if (!session) throw new Error(`Session ${id} not found`)
     const header = `# ${session.tool_label} — ${session.id}\nDir: ${session.directory ?? "unknown"} | ${session.message_count} messages\n\n---\n\n`
     return { contents: [{ uri, mimeType: "text/plain", text: header + session.conversation }] }
@@ -283,7 +345,9 @@ server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
 
 // ── Prompts ───────────────────────────────────────────────────────────────────
 
-server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+server.setRequestHandler(ListPromptsRequestSchema, async () => {
+  recordMcpHit({ kind: "prompt", name: "list_prompts", result: "ok", count: 1 })
+  return {
   prompts: [{
     name: "load_context",
     description: "Load a prior conversation as context to continue working on it",
@@ -292,11 +356,13 @@ server.setRequestHandler(ListPromptsRequestSchema, async () => ({
       { name: "tool", description: "Tool name: claude / opencode / codex / copilot", required: true },
     ],
   }],
-}))
+  }
+})
 
 server.setRequestHandler(GetPromptRequestSchema, async (req) => {
   const { id, tool } = req.params.arguments ?? {}
   const session = getSession(id, tool)
+  recordMcpHit({ kind: "prompt", name: "get_prompt", prompt: "load_context", tool: tool ?? null, session_id: id ?? null, result: session ? "hit" : "miss", session: sessionAuditMeta(session) })
   if (!session) throw new Error(`Session ${id} (${tool}) not found`)
 
   return {

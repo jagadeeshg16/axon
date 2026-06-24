@@ -15,8 +15,8 @@ transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
 [[ -z "$session_id" || -z "$transcript_path" || ! -f "$transcript_path" ]] && exit 0
 
 file=$(session_file "codex" "$session_id")
-> "$file"
 mkdir -p "$(dirname "$file")"
+> "$file"
 
 while IFS= read -r line; do
   # Codex transcript uses same schema as Claude Code

@@ -15,11 +15,18 @@ f = sys.argv[1]
 if not os.path.exists(f): sys.exit(0)
 d = json.load(open(f))
 stops = d.get('hooks', {}).get('Stop', [])
-filtered = [g for g in stops if not any(
-    h.get('command','').find('axon') != -1
-    for h in g.get('hooks', [])
-)]
-if len(filtered) == len(stops):
+changed = False
+filtered = []
+for group in stops:
+    hooks = group.get('hooks', [])
+    kept = [h for h in hooks if 'axon' not in h.get('command','')]
+    if len(kept) != len(hooks):
+        changed = True
+    if kept:
+        ng = dict(group)
+        ng['hooks'] = kept
+        filtered.append(ng)
+if not changed:
     print("  – not installed")
     sys.exit(0)
 d['hooks']['Stop'] = filtered
@@ -43,7 +50,6 @@ print("  ✓ plugin removed")
 PY
 
 hdr "Codex CLI"
-hook="$HOME/.copilot/hooks/axon.json"
 if [ -f "$HOME/.codex/hooks.json" ]; then
   python3 - "$HOME/.codex/hooks.json" <<'PY'
 import json, sys, os

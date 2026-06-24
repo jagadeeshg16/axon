@@ -18,6 +18,14 @@ Each tool's `Stop` / `sessionEnd` hook runs a script that reads the tool's trans
 
 ## Setup
 
+### Quick install
+
+```bash
+./install.sh --all
+```
+
+Use individual flags like `--claude`, `--opencode`, `--codex`, `--copilot`, `--service`, or `--ui` when you only want part of the setup.
+
 ### Claude Code
 
 Add to `~/.claude/settings.json`:
@@ -28,7 +36,7 @@ Add to `~/.claude/settings.json`:
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "/home/jagadeesh-12581/tools/axon/hooks/claude/on-stop.sh"
+        "command": "/path/to/axon/hooks/claude/on-stop.sh"
       }]
     }]
   }
@@ -54,7 +62,7 @@ npm run build
 Then add to your OpenCode config (`~/.config/opencode/config.json` or `opencode.json`):
 ```json
 {
-  "plugins": ["/home/jagadeesh-12581/tools/axon/hooks/opencode/plugin"]
+  "plugin": ["/path/to/axon/hooks/opencode/plugin"]
 }
 ```
 
@@ -65,10 +73,29 @@ Override the log directory:
 export AI_CHAT_LOG_DIR=~/my-chats
 ```
 
+Session Insights can use any connected provider. GitHub Copilot works through the existing Copilot sign-in flow; OpenAI and Claude API use environment keys:
+```bash
+# OpenAI API provider
+export OPENAI_API_KEY=sk-...
+export OPENAI_MODEL=gpt-5.5              # optional
+export OPENAI_ORGANIZATION=org_...       # optional
+export OPENAI_PROJECT=proj_...           # optional
+
+# Claude API provider
+export ANTHROPIC_API_KEY=sk-ant-...
+export ANTHROPIC_MODEL=claude-sonnet-4-6 # optional
+# CLAUDE_API_KEY is also accepted as an alias for ANTHROPIC_API_KEY.
+
+# Run Insights automatically every 6 hours.
+export AXON_INSIGHTS_CRON=1
+```
+
+`ANTHROPIC_VERSION` defaults to `2023-06-01` and can be overridden if Anthropic requires a newer API version for your account.
+
 ## To publish
 
 ```bash
-cd /home/jagadeesh-12581/tools/axon
+cd /path/to/axon
 git init
 git add .
 git commit -m "initial commit"

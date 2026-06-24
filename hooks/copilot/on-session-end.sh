@@ -17,8 +17,8 @@ has_messages=$(echo "$input" | jq 'has("messages")')
 [[ "$has_messages" != "true" ]] && exit 0
 
 file=$(session_file "copilot" "$session_id")
-> "$file"
 mkdir -p "$(dirname "$file")"
+> "$file"
 
 echo "$input" | jq -c '.messages[]?' | while IFS= read -r msg; do
   role=$(echo "$msg"    | jq -r '.role // empty')

@@ -5,6 +5,7 @@ import path from "path"
 import { execFileSync, spawn } from "child_process"
 import { fileURLToPath } from "url"
 import { DatabaseSync } from "node:sqlite"
+import { randomBytes } from "crypto"
 
 const __dirname  = path.dirname(fileURLToPath(import.meta.url))
 const HOME       = process.env.HOME
@@ -15,7 +16,10 @@ const PORT_HISTORY = path.join(LOG_DIR, "port-history.jsonl")
 const SYNC_STATE   = path.join(LOG_DIR, "sync-state.json")
 const DIRS_FILE    = path.join(LOG_DIR, "session-dirs.json")
 const PORT         = process.env.PORT ?? 4242
+const HOST         = process.env.HOST ?? "127.0.0.1"
+const UI_TOKEN     = process.env.AXON_UI_TOKEN ?? randomBytes(32).toString("hex")
 const MCP_SERVER   = path.join(__dirname, "..", "mcp", "server.js")
+const MCP_HITS_FILE = path.join(LOG_DIR, "mcp-hits.jsonl")
 const FEED_HISTORY = path.join(LOG_DIR, "feed-history.json")
 const OPENCODE_CFG = path.join(process.env.HOME, ".config", "opencode", "opencode.json")
 const USAGE_CACHE        = path.join(LOG_DIR, "usage-cache.json")
@@ -26,10 +30,21 @@ const INSIGHTS_CACHE          = path.join(LOG_DIR, "insights-cache.json")
 const INSIGHTS_RECURRING_CACHE = path.join(LOG_DIR, "insights-recurring-cache.json")
 const INSIGHTS_TTL       = 10 * 60 * 1000  // 10 minutes
 const INSIGHTS_INTERVAL  = 6 * 60 * 60 * 1000  // 6 hours
+const INSIGHTS_HISTORY_VERSION = 2
+const ENABLE_INSIGHTS_CRON = process.env.AXON_INSIGHTS_CRON === "1"
 
 const MIME = {
   ".html": "text/html", ".css": "text/css",
   ".js": "application/javascript", ".json": "application/json",
+}
+const TOOL_KEYS = new Set(["claude", "opencode", "codex", "copilot"])
+
+function isSafeSessionId(id) {
+  return typeof id === "string" && id.length > 0 && !id.includes("/") && !id.includes("\\") && !id.includes("\0")
+}
+
+function assertTool(tool) {
+  if (!TOOL_KEYS.has(tool)) throw new Error(`Unknown tool: ${tool}`)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -45,6 +60,73 @@ function readJSONL(file) {
 function appendJSONL(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.appendFileSync(file, JSON.stringify(obj) + "\n")
+}
+
+function mcpHitKey(hit) {
+  return [hit.kind, hit.name, hit.uri || hit.prompt].filter(Boolean).join(":") || "unknown"
+}
+
+function incCounter(map, key, by = 1) {
+  if (!key) return
+  map[key] = (map[key] || 0) + by
+}
+
+function summarizeMcpHits() {
+  const hits = readJSONL(MCP_HITS_FILE)
+  const now = Date.now()
+  const dayAgo = now - 24 * 60 * 60 * 1000
+  const byName = {}
+  const byKind = {}
+  const byTool = {}
+  const sessionHits = {}
+
+  for (const hit of hits) {
+    incCounter(byName, mcpHitKey(hit))
+    incCounter(byKind, hit.kind || "unknown")
+    incCounter(byTool, hit.tool || hit.session?.tool || "all")
+
+    const loadedSession = hit.session || null
+    if (loadedSession && hit.result === "hit") {
+      const key = `${loadedSession.tool}:${loadedSession.session_id}`
+      sessionHits[key] = sessionHits[key] || { ...loadedSession, hits: 0, last_hit_at: null }
+      sessionHits[key].hits++
+      sessionHits[key].last_hit_at = hit.ts
+      if (loadedSession.content_hash) sessionHits[key].content_hash = loadedSession.content_hash
+      if (loadedSession.source_mtime) sessionHits[key].source_mtime = loadedSession.source_mtime
+      if (loadedSession.ts_last) sessionHits[key].ts_last = loadedSession.ts_last
+    }
+  }
+
+  const topSessions = Object.values(sessionHits)
+    .sort((a, b) => b.hits - a.hits || new Date(b.last_hit_at || 0) - new Date(a.last_hit_at || 0))
+    .slice(0, 10)
+
+  const recent = hits.slice(-25).reverse().map(hit => ({
+    ts: hit.ts,
+    kind: hit.kind,
+    name: hit.name,
+    uri: hit.uri,
+    prompt: hit.prompt,
+    tool: hit.tool || hit.session?.tool || null,
+    session_id: hit.session_id || hit.session?.session_id || null,
+    result: hit.result,
+    count: hit.count,
+    query_len: hit.query_len,
+    query_hash: hit.query_hash,
+    search_hash: hit.search_hash,
+    session: hit.session || null,
+    results: Array.isArray(hit.results) ? hit.results.slice(0, 5) : undefined,
+  }))
+
+  return {
+    total: hits.length,
+    last24h: hits.filter(h => Date.parse(h.ts) >= dayAgo).length,
+    byName: Object.entries(byName).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
+    byKind: Object.entries(byKind).map(([kind, count]) => ({ kind, count })).sort((a, b) => b.count - a.count),
+    byTool: Object.entries(byTool).map(([tool, count]) => ({ tool, count })).sort((a, b) => b.count - a.count),
+    topSessions,
+    recent,
+  }
 }
 
 function genSessionId() {
@@ -68,6 +150,37 @@ function encodeProjectDir(dir) {
 function loadDirs() {
   if (!fs.existsSync(DIRS_FILE)) return {}
   try { return JSON.parse(fs.readFileSync(DIRS_FILE, "utf8")) } catch { return {} }
+}
+
+function expandHome(p) {
+  return typeof p === "string" ? p.replace(/^~(?=$|\/)/, HOME) : p
+}
+
+function validateTargetDir(dir) {
+  if (!dir || typeof dir !== "string") return HOME
+  if (dir.includes("\0")) throw new Error("Invalid target directory")
+
+  const resolved = path.resolve(expandHome(dir))
+  if (!fs.existsSync(resolved)) throw new Error(`Target directory does not exist: ${dir}`)
+  const real = fs.realpathSync(resolved)
+  if (!fs.statSync(real).isDirectory()) throw new Error(`Target is not a directory: ${dir}`)
+
+  if (process.env.AXON_ALLOW_SENSITIVE_TARGETS !== "1") {
+    const sensitive = [
+      path.join(HOME, ".ssh"),
+      path.join(HOME, ".codex"),
+      path.join(HOME, ".claude"),
+      path.join(HOME, ".config", "github-copilot"),
+      path.join(HOME, ".config", "opencode"),
+    ].map(p => {
+      try { return fs.realpathSync(p) } catch { return path.resolve(p) }
+    })
+    if (sensitive.some(p => real === p || real.startsWith(p + path.sep))) {
+      throw new Error("Refusing to write context files into a tool credential/config directory")
+    }
+  }
+
+  return real
 }
 
 // ── Direct tool stats readers (no ccusage dependency) ────────────────────────
@@ -260,6 +373,13 @@ function readCopilotStats() {
 const COPILOT_CHAT_URL   = "https://api.githubcopilot.com/chat/completions"
 const COPILOT_TOKEN_URL  = "https://api.github.com/copilot_internal/v2/token"
 const COPILOT_MODELS_URL = "https://api.business.githubcopilot.com/models"
+const OPENAI_CHAT_URL    = "https://api.openai.com/v1/chat/completions"
+const OPENAI_MODELS_URL  = "https://api.openai.com/v1/models"
+const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+const ANTHROPIC_MODELS_URL   = "https://api.anthropic.com/v1/models"
+const ANTHROPIC_VERSION      = process.env.ANTHROPIC_VERSION ?? "2023-06-01"
+const OPENAI_DEFAULT_MODEL   = process.env.OPENAI_MODEL ?? "gpt-5.5"
+const ANTHROPIC_DEFAULT_MODEL = process.env.ANTHROPIC_MODEL ?? process.env.CLAUDE_MODEL ?? "claude-sonnet-4-6"
 const COPILOT_HEADERS    = {
   "Editor-Version": "OpenCode/1.0",
   "Editor-Plugin-Version": "OpenCode/1.0",
@@ -268,6 +388,8 @@ const COPILOT_HEADERS    = {
 
 let _copilotToken = { bearer: null, expiresAt: 0, modelsUrl: null }
 let _modelCache   = { models: [], fetchedAt: 0 }
+let _openAIModelCache = { models: [], fetchedAt: 0 }
+let _anthropicModelCache = { models: [], fetchedAt: 0 }
 let _deviceAuth   = { device_code: null, interval: 5, expiresAt: 0, done: false, token: null }
 
 function getOAuthToken() {
@@ -356,25 +478,233 @@ async function getCopilotModels() {
   return _modelCache.models
 }
 
+function getOpenAIKey() {
+  return process.env.OPENAI_API_KEY || null
+}
+
+function getAnthropicKey() {
+  return process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY || null
+}
+
+function withProvider(provider, model) {
+  return {
+    ...model,
+    provider,
+    id: `${provider}:${model.id}`,
+    model: model.id,
+    name: `${provider === "openai" ? "OpenAI" : provider === "anthropic" ? "Claude API" : "Copilot"} · ${model.name || model.id}`,
+  }
+}
+
+function sortProviderModels(models, preferred) {
+  return models.sort((a, b) => {
+    if (a.id === preferred) return -1
+    if (b.id === preferred) return 1
+    const ap = /(^gpt-5|opus|sonnet|claude)/i.test(a.id) ? 0 : 1
+    const bp = /(^gpt-5|opus|sonnet|claude)/i.test(b.id) ? 0 : 1
+    return ap - bp || a.id.localeCompare(b.id)
+  })
+}
+
+async function getOpenAIModels() {
+  const key = getOpenAIKey()
+  if (!key) throw new Error("OPENAI_API_KEY not set")
+  if (_openAIModelCache.models.length && Date.now() - _openAIModelCache.fetchedAt < 60 * 60 * 1000) return _openAIModelCache.models
+  const headers = { Authorization: `Bearer ${key}` }
+  if (process.env.OPENAI_ORGANIZATION) headers["OpenAI-Organization"] = process.env.OPENAI_ORGANIZATION
+  if (process.env.OPENAI_PROJECT) headers["OpenAI-Project"] = process.env.OPENAI_PROJECT
+  const res = await fetch(OPENAI_MODELS_URL, { headers, signal: AbortSignal.timeout(15000) })
+  if (!res.ok) throw new Error(`OpenAI models fetch failed: ${res.status}`)
+  const data = await res.json()
+  const all = Array.isArray(data.data) ? data.data : []
+  const chatModels = all
+    .map(m => ({ id: m.id, name: m.id, category: /^gpt-5/i.test(m.id) ? "powerful" : "versatile", maxInputTokens: 128000, maxOutputTokens: 8192 }))
+    .filter(m => /^(gpt-|o\d|chatgpt)/i.test(m.id))
+  if (!chatModels.some(m => m.id === OPENAI_DEFAULT_MODEL)) {
+    chatModels.unshift({ id: OPENAI_DEFAULT_MODEL, name: OPENAI_DEFAULT_MODEL, category: "powerful", maxInputTokens: 128000, maxOutputTokens: 8192 })
+  }
+  _openAIModelCache.models = sortProviderModels(chatModels, OPENAI_DEFAULT_MODEL)
+  _openAIModelCache.fetchedAt = Date.now()
+  return _openAIModelCache.models
+}
+
+async function getAnthropicModels() {
+  const key = getAnthropicKey()
+  if (!key) throw new Error("ANTHROPIC_API_KEY not set")
+  if (_anthropicModelCache.models.length && Date.now() - _anthropicModelCache.fetchedAt < 60 * 60 * 1000) return _anthropicModelCache.models
+  const res = await fetch(ANTHROPIC_MODELS_URL, {
+    headers: { "x-api-key": key, "anthropic-version": ANTHROPIC_VERSION },
+    signal: AbortSignal.timeout(15000),
+  })
+  if (!res.ok) throw new Error(`Claude API models fetch failed: ${res.status}`)
+  const data = await res.json()
+  const all = Array.isArray(data.data) ? data.data : []
+  const models = all.map(m => ({
+    id: m.id,
+    name: m.display_name || m.id,
+    category: /opus/i.test(m.id) ? "powerful" : "versatile",
+    maxInputTokens: m.context_window || 200000,
+    maxOutputTokens: 8192,
+  }))
+  if (!models.some(m => m.id === ANTHROPIC_DEFAULT_MODEL)) {
+    models.unshift({ id: ANTHROPIC_DEFAULT_MODEL, name: ANTHROPIC_DEFAULT_MODEL, category: "versatile", maxInputTokens: 200000, maxOutputTokens: 8192 })
+  }
+  _anthropicModelCache.models = sortProviderModels(models, ANTHROPIC_DEFAULT_MODEL)
+  _anthropicModelCache.fetchedAt = Date.now()
+  return _anthropicModelCache.models
+}
+
+function parseInsightSelection(value) {
+  if (!value) return { provider: null, model: null }
+  const idx = value.indexOf(":")
+  if (idx > 0) {
+    const provider = value.slice(0, idx)
+    const model = value.slice(idx + 1)
+    if (["copilot", "openai", "anthropic"].includes(provider) && model) return { provider, model }
+  }
+  return { provider: "copilot", model: value }
+}
+
+async function getInsightModels() {
+  const providers = []
+  const models = []
+
+  try {
+    const cm = await getCopilotModels()
+    providers.push({ id: "copilot", label: "GitHub Copilot", connected: true, source: "github-copilot" })
+    models.push(...cm.map(m => withProvider("copilot", m)))
+  } catch (e) {
+    providers.push({ id: "copilot", label: "GitHub Copilot", connected: false, reason: e.message })
+  }
+
+  try {
+    const om = await getOpenAIModels()
+    providers.push({ id: "openai", label: "OpenAI API", connected: true, source: "OPENAI_API_KEY" })
+    models.push(...om.map(m => withProvider("openai", m)))
+  } catch (e) {
+    providers.push({ id: "openai", label: "OpenAI API", connected: false, reason: e.message })
+  }
+
+  try {
+    const am = await getAnthropicModels()
+    providers.push({ id: "anthropic", label: "Claude API", connected: true, source: getAnthropicKey() === process.env.CLAUDE_API_KEY ? "CLAUDE_API_KEY" : "ANTHROPIC_API_KEY" })
+    models.push(...am.map(m => withProvider("anthropic", m)))
+  } catch (e) {
+    providers.push({ id: "anthropic", label: "Claude API", connected: false, reason: e.message })
+  }
+
+  return { providers, models }
+}
+
+async function resolveInsightModel(selectionValue) {
+  const requested = parseInsightSelection(selectionValue)
+  const { models } = await getInsightModels()
+  let chosen = requested.provider && requested.model
+    ? models.find(m => m.provider === requested.provider && m.model === requested.model)
+    : null
+  if (!chosen) chosen = models[0]
+  if (!chosen) throw new Error("No Insights provider connected. Set OPENAI_API_KEY or ANTHROPIC_API_KEY, or connect GitHub Copilot.")
+  return chosen
+}
+
+async function callInsightModel(provider, model, systemPrompt, userMsg, maxTokens, signal) {
+  if (provider === "copilot") {
+    const res = await copilotFetch(COPILOT_CHAT_URL, {
+      method: "POST",
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMsg }],
+        temperature: 0.3,
+        max_tokens: maxTokens,
+      }),
+      signal,
+    })
+    if (!res.ok) throw new Error(`Copilot analysis failed: ${res.status} ${await res.text()}`)
+    const data = await res.json()
+    const choice = data.choices?.[0]
+    return { raw: choice?.message?.content || "", finishReason: choice?.finish_reason || "unknown", usage: data.usage, error: data.error }
+  }
+
+  if (provider === "openai") {
+    const key = getOpenAIKey()
+    if (!key) throw new Error("OPENAI_API_KEY not set")
+    const headers = { "Content-Type": "application/json", Authorization: `Bearer ${key}` }
+    if (process.env.OPENAI_ORGANIZATION) headers["OpenAI-Organization"] = process.env.OPENAI_ORGANIZATION
+    if (process.env.OPENAI_PROJECT) headers["OpenAI-Project"] = process.env.OPENAI_PROJECT
+    const res = await fetch(OPENAI_CHAT_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "developer", content: systemPrompt }, { role: "user", content: userMsg }],
+        max_completion_tokens: maxTokens,
+      }),
+      signal,
+    })
+    if (!res.ok) throw new Error(`OpenAI analysis failed: ${res.status} ${await res.text()}`)
+    const data = await res.json()
+    const choice = data.choices?.[0]
+    return { raw: choice?.message?.content || "", finishReason: choice?.finish_reason || "unknown", usage: data.usage, error: data.error }
+  }
+
+  if (provider === "anthropic") {
+    const key = getAnthropicKey()
+    if (!key) throw new Error("ANTHROPIC_API_KEY not set")
+    const res = await fetch(ANTHROPIC_MESSAGES_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": ANTHROPIC_VERSION },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userMsg }],
+      }),
+      signal,
+    })
+    if (!res.ok) throw new Error(`Claude API analysis failed: ${res.status} ${await res.text()}`)
+    const data = await res.json()
+    const raw = (data.content || []).filter(p => p.type === "text").map(p => p.text || "").join("")
+    return { raw, finishReason: data.stop_reason || "unknown", usage: data.usage, error: data.error }
+  }
+
+  throw new Error(`Unknown Insights provider: ${provider}`)
+}
+
 // ── Insights: bundle + analysis ───────────────────────────────────────────────
 
-function readInsightsHistory() {
+function emptyCheckpoint() {
+  return { version: INSIGHTS_HISTORY_VERSION, lastAnalyzedAt: null, analyzedIds: [], analyzedDates: [] }
+}
+
+function readAllInsightsHistory() {
   if (!fs.existsSync(INSIGHTS_HISTORY)) return []
   return fs.readFileSync(INSIGHTS_HISTORY, "utf8").trim().split("\n")
     .flatMap(l => { try { return [JSON.parse(l)] } catch { return [] } })
+}
+
+function readInsightsHistory() {
+  return readAllInsightsHistory()
+    .filter(r => r.version === INSIGHTS_HISTORY_VERSION)
     .sort((a, b) => (a.date > b.date ? 1 : -1))
 }
 
+function countLegacyInsightsRecords() {
+  return readAllInsightsHistory().filter(r => r.version !== INSIGHTS_HISTORY_VERSION).length
+}
+
 function readCheckpoint() {
-  try { return JSON.parse(fs.readFileSync(INSIGHTS_CHECKPOINT, "utf8")) }
-  catch { return { lastAnalyzedAt: null, analyzedIds: [], analyzedDates: [] } }
+  try {
+    const cp = JSON.parse(fs.readFileSync(INSIGHTS_CHECKPOINT, "utf8"))
+    return cp.version === INSIGHTS_HISTORY_VERSION ? cp : emptyCheckpoint()
+  } catch { return emptyCheckpoint() }
 }
 function writeCheckpoint(updates) {
   const existing = readCheckpoint()
   const merged = {
     ...existing,
     ...updates,
-    // Always accumulate — never lose tracked IDs/dates across runs
+    version: INSIGHTS_HISTORY_VERSION,
+    // Always accumulate; never lose tracked IDs/dates across runs.
     analyzedIds:    [...new Set([...(existing.analyzedIds   || []), ...(updates.analyzedIds   || [])])],
     analyzedDates:  [...new Set([...(existing.analyzedDates || []), ...(updates.analyzedDates || [])])],
   }
@@ -382,36 +712,101 @@ function writeCheckpoint(updates) {
 }
 
 function appendInsightsRecord(record) {
-  try { fs.appendFileSync(INSIGHTS_HISTORY, JSON.stringify(record) + "\n") } catch {}
+  try { fs.appendFileSync(INSIGHTS_HISTORY, JSON.stringify({ version: INSIGHTS_HISTORY_VERSION, ...record }) + "\n") } catch {}
 }
 
-// Build a bundle of sessions newer than `sinceTs`, capped by token budget
-// Build a bundle of sessions within [sinceTs, untilTs], skipping excludeIds, capped by token budget
-function buildAnalysisBundle(sinceTs, tokenBudget, { excludeIds = new Set(), untilTs = Infinity, maxSessions = 8 } = {}) {
-  const USER_CAP    = 600
-  const ASST_CAP    = 250
-  const CHARS_PER_TOK = 4
-  const MAX_MSGS_PER_SESSION = 40
-  const budgetChars = tokenBudget * CHARS_PER_TOK
+function parseInsightTimestamp(ts) {
+  if (!ts) return null
+  if (typeof ts === "number") {
+    const ms = ts > 1e12 ? ts : ts * 1000
+    return Number.isFinite(ms) ? ms : null
+  }
+  const ms = Date.parse(ts)
+  return Number.isFinite(ms) ? ms : null
+}
 
-  // ── Collect candidate files from all sources ──────────────────────────────
-  const candidates = []   // { fpath, mtime, tool, sessionId, format: "axon"|"claude_raw" }
+function insightDateKey(ms) {
+  const d = new Date(ms)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  const day = String(d.getDate()).padStart(2, "0")
+  return `${y}-${m}-${day}`
+}
 
-  // Source 1: axon sessions dir (claude, opencode, copilot, codex — all already normalised)
+function insightDayStartMs(dateKey) {
+  const [y, m, d] = dateKey.split("-").map(Number)
+  return new Date(y, m - 1, d).getTime()
+}
+
+function insightDayEndMs(dateKey) {
+  const [y, m, d] = dateKey.split("-").map(Number)
+  return new Date(y, m - 1, d + 1).getTime() - 1
+}
+
+function analysisSessionKey(tool, sessionId, marker = null) {
+  return marker ? `${tool}:${sessionId}:${marker}` : `${tool}:${sessionId}`
+}
+
+function isExcludedSession(excludeIds, tool, sessionId, marker = null) {
+  if (marker) return excludeIds.has(analysisSessionKey(tool, sessionId, marker))
+  return excludeIds.has(analysisSessionKey(tool, sessionId)) || excludeIds.has(sessionId)
+}
+
+function parseAxonMsgs(fpath) {
+  return readJSONL(fpath).filter(m => m.role === "user" || m.role === "assistant")
+    .map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content : JSON.stringify(m.content), ts: m.ts }))
+}
+
+function isInsightNoiseUserMessage(text) {
+  const t = String(text || "").trim()
+  if (!t) return true
+  if (/^<turn_aborted>/i.test(t)) return true
+  if (/^<environment_context>/i.test(t)) return true
+  if (/^<permissions instructions>/i.test(t)) return true
+  if (/^continue$/i.test(t)) return true
+  if (/^Session Breakdown\s+—/i.test(t) && /Suggested improvement/i.test(t)) return true
+  return false
+}
+
+function insightUsefulMessages(messages) {
+  const filtered = messages.filter(m => !(m.role === "user" && isInsightNoiseUserMessage(m.content)))
+  return filtered.length ? filtered : messages
+}
+
+function parseClaudeRawMsgs(fpath) {
+  const lines = fs.readFileSync(fpath, "utf8").trim().split("\n").filter(Boolean)
+  const msgs = []
+  for (const line of lines) {
+    try {
+      const d = JSON.parse(line)
+      if (d.type === "user") {
+        const c = d.message?.content
+        const text = typeof c === "string" ? c : Array.isArray(c) ? c.filter(x => x.type === "text").map(x => x.text).join(" ") : ""
+        if (text.trim()) msgs.push({ role: "user", content: text, ts: d.timestamp })
+      } else if (d.type === "assistant") {
+        const c = d.message?.content
+        const text = Array.isArray(c) ? c.filter(x => x.type === "text").map(x => x.text).join(" ") : typeof c === "string" ? c : ""
+        if (text.trim()) msgs.push({ role: "assistant", content: text, ts: d.timestamp })
+      }
+    } catch {}
+  }
+  return msgs
+}
+
+function collectAnalysisCandidates({ sinceTs = 0, untilTs = Infinity, excludeIds = new Set() } = {}) {
+  const descriptors = []
+
   if (fs.existsSync(SESSIONS_DIR)) {
     for (const f of fs.readdirSync(SESSIONS_DIR).filter(x => x.endsWith(".jsonl"))) {
       try {
-        const stat = fs.statSync(path.join(SESSIONS_DIR, f))
-        if (stat.mtimeMs < (sinceTs || 0) || stat.mtimeMs > untilTs) continue
         const tool = f.split("-")[0]
         const sessionId = f.slice(tool.length + 1, -6)
-        if (excludeIds.has(sessionId)) continue
-        candidates.push({ fpath: path.join(SESSIONS_DIR, f), mtime: stat.mtimeMs, tool, sessionId, format: "axon" })
+        const fpath = path.join(SESSIONS_DIR, f)
+        descriptors.push({ fpath, mtime: fs.statSync(fpath).mtimeMs, tool, sessionId, format: "axon" })
       } catch {}
     }
   }
 
-  // Source 2: Claude Code raw JSONL (~/.claude/projects/**/*.jsonl)
   const CLAUDE_PROJ = path.join(HOME, ".claude", "projects")
   if (fs.existsSync(CLAUDE_PROJ)) {
     for (const proj of fs.readdirSync(CLAUDE_PROJ)) {
@@ -421,116 +816,148 @@ function buildAnalysisBundle(sinceTs, tokenBudget, { excludeIds = new Set(), unt
         for (const f of fs.readdirSync(projDir).filter(x => x.endsWith(".jsonl"))) {
           const fpath = path.join(projDir, f)
           try {
-            const stat = fs.statSync(fpath)
-            if (stat.mtimeMs < (sinceTs || 0) || stat.mtimeMs > untilTs) continue
             const sessionId = f.slice(0, -6)
-            if (excludeIds.has(sessionId)) continue
-            candidates.push({ fpath, mtime: stat.mtimeMs, tool: "claude", sessionId, format: "claude_raw" })
+            descriptors.push({ fpath, mtime: fs.statSync(fpath).mtimeMs, tool: "claude", sessionId, format: "claude_raw" })
           } catch {}
         }
       } catch {}
     }
   }
 
-  // Dedup by sessionId (axon copy wins over raw if both present), sort newest first
   const seen = new Set()
-  const allFiles = candidates
-    .sort((a, b) => (a.format === "axon" ? 0 : 1) - (b.format === "axon" ? 0 : 1))  // axon first
-    .filter(c => { if (seen.has(c.sessionId)) return false; seen.add(c.sessionId); return true })
-    .sort((a, b) => b.mtime - a.mtime)
+  return descriptors
+    .sort((a, b) => (a.format === "axon" ? 0 : 1) - (b.format === "axon" ? 0 : 1))
+    .filter(c => {
+      const key = analysisSessionKey(c.tool, c.sessionId)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .flatMap(c => {
+      try {
+        const messages = c.format === "axon" ? parseAxonMsgs(c.fpath) : parseClaudeRawMsgs(c.fpath)
+        if (!messages.length) return []
+
+        const lower = sinceTs || 0
+        const withTimes = messages.map(m => ({ ...m, ms: parseInsightTimestamp(m.ts) }))
+        const timed = withTimes.filter(m => m.ms !== null)
+        const allTimes = timed.map(m => m.ms)
+        const firstMs = allTimes.length ? Math.min(...allTimes) : c.mtime
+        const lastMs = allTimes.length ? Math.max(...allTimes) : c.mtime
+        const messageDates = [...new Set(timed.map(m => insightDateKey(m.ms)))]
+
+        const windowMessages = timed.filter(m => m.ms >= lower && m.ms <= untilTs)
+        let selectedMessages = windowMessages
+        let activityMs = windowMessages.length ? Math.max(...windowMessages.map(m => m.ms)) : null
+
+        if (!selectedMessages.length) {
+          if (allTimes.length || c.mtime < lower || c.mtime > untilTs) return []
+          selectedMessages = withTimes
+          activityMs = c.mtime
+        }
+
+        const sessionKey = analysisSessionKey(c.tool, c.sessionId, String(activityMs))
+        if (isExcludedSession(excludeIds, c.tool, c.sessionId, String(activityMs))) return []
+
+        return [{
+          ...c,
+          messages: selectedMessages.map(({ ms, ...m }) => m),
+          firstMs,
+          lastMs,
+          activityMs,
+          messageDates,
+          sessionKey,
+        }]
+      } catch { return [] }
+    })
+    .sort((a, b) => b.activityMs - a.activityMs)
+}
+
+// Build a bundle of sessions with activity inside [sinceTs, untilTs], capped by token budget.
+function buildAnalysisBundle(sinceTs, tokenBudget, { excludeIds = new Set(), untilTs = Infinity, maxSessions = 8 } = {}) {
+  const USER_CAP    = 600
+  const ASST_CAP    = 250
+  const CHARS_PER_TOK = 4
+  const MAX_MSGS_PER_SESSION = 40
+  const budgetChars = tokenBudget * CHARS_PER_TOK
+  const allFiles = collectAnalysisCandidates({ sinceTs, untilTs, excludeIds })
 
   if (!allFiles.length) return []
 
-  // ── Parse messages from each session ─────────────────────────────────────
-  function parseAxonMsgs(fpath) {
-    return readJSONL(fpath).filter(m => m.role === "user" || m.role === "assistant")
-      .map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content : JSON.stringify(m.content), ts: m.ts }))
-  }
-
-  function parseClaudeRawMsgs(fpath) {
-    const lines = fs.readFileSync(fpath, "utf8").trim().split("\n").filter(Boolean)
-    const msgs = []
-    for (const line of lines) {
-      try {
-        const d = JSON.parse(line)
-        if (d.type === "user") {
-          const c = d.message?.content
-          const text = typeof c === "string" ? c : Array.isArray(c) ? c.filter(x => x.type === "text").map(x => x.text).join(" ") : ""
-          if (text.trim()) msgs.push({ role: "user", content: text, ts: d.timestamp })
-        } else if (d.type === "assistant") {
-          const c = d.message?.content
-          const text = Array.isArray(c) ? c.filter(x => x.type === "text").map(x => x.text).join(" ") : typeof c === "string" ? c : ""
-          if (text.trim()) msgs.push({ role: "assistant", content: text, ts: d.timestamp })
-        }
-      } catch {}
-    }
-    return msgs
-  }
-
-  // ── Build bundle greedy ───────────────────────────────────────────────────
   let usedChars = 0
   const sessions = []
 
-  for (const { fpath, tool, sessionId, format } of allFiles) {
-    try {
-      const msgs = format === "axon" ? parseAxonMsgs(fpath) : parseClaudeRawMsgs(fpath)
-      if (!msgs.length) continue
+  for (const { tool, sessionId, sessionKey, messages, activityMs } of allFiles) {
+    const usefulMessages = insightUsefulMessages(messages)
+    const rawChars = usefulMessages.reduce((a, m) => a + m.content.length, 0)
+    const isShort  = rawChars < 2000
 
-      const rawChars = msgs.reduce((a, m) => a + m.content.length, 0)
-      const isShort  = rawChars < 2000
+    const trimmed = usefulMessages.length > MAX_MSGS_PER_SESSION
+      ? [...usefulMessages.slice(0, MAX_MSGS_PER_SESSION / 2), ...usefulMessages.slice(-MAX_MSGS_PER_SESSION / 2)]
+      : usefulMessages
 
-      // For long sessions keep first half + last half to show arc
-      const trimmed = msgs.length > MAX_MSGS_PER_SESSION
-        ? [...msgs.slice(0, MAX_MSGS_PER_SESSION / 2), ...msgs.slice(-MAX_MSGS_PER_SESSION / 2)]
-        : msgs
+    const formatted = []
+    let sessChars = 0
+    for (const m of trimmed) {
+      const trunc = isShort ? m.content : (m.role === "user" ? m.content.slice(0, USER_CAP) : m.content.slice(0, ASST_CAP))
+      formatted.push({ role: m.role, content: trunc, ts: m.ts })
+      sessChars += trunc.length
+    }
 
-      const formatted = []
-      let sessChars = 0
-      for (const m of trimmed) {
-        const trunc = isShort ? m.content : (m.role === "user" ? m.content.slice(0, USER_CAP) : m.content.slice(0, ASST_CAP))
-        formatted.push({ role: m.role, content: trunc, ts: m.ts })
-        sessChars += trunc.length
-      }
-
-      if (usedChars + sessChars > budgetChars && sessions.length >= 1) break
-      sessions.push({ sessionId, tool, messages: formatted, rawChars })
-      usedChars += sessChars
-      if (sessions.length >= maxSessions) break
-    } catch {}
+    if (usedChars + sessChars > budgetChars && sessions.length >= 1) break
+    sessions.push({ sessionId, sessionKey, tool, messages: formatted, rawChars, activityDate: insightDateKey(activityMs) })
+    usedChars += sessChars
+    if (sessions.length >= maxSessions) break
   }
 
   return sessions
 }
 
-async function runInsightsAnalysis({ forceWindow = null, model: modelId = null, overrideDate = null, sinceTs: forceSinceTs = null, untilTs: forceUntilTs = null, maxSessions = 8 } = {}) {
+
+function realSessionDetails(bundle, parsedSessions) {
+  return bundle.map((session, idx) => {
+    const modelDetail = parsedSessions[idx] || {}
+    const firstUser = session.messages.find(m => m.role === "user" && !isInsightNoiseUserMessage(m.content))?.content
+      || session.messages.find(m => m.role === "user")?.content
+      || ""
+    return {
+      ...modelDetail,
+      sessionId: session.sessionId,
+      tool: session.tool,
+      original: firstUser.slice(0, 500),
+    }
+  })
+}
+
+async function runInsightsAnalysis({ forceWindow = null, model: modelId = null, overrideDate = null, sinceTs: forceSinceTs = null, untilTs: forceUntilTs = null, maxSessions = 8, preselectedBundle = null } = {}) {
   // Load checkpoint to know where we left off
   const cp = readCheckpoint()
   const excludeIds = new Set(cp.analyzedIds || [])
 
   let sinceTs, untilTs
+  const hasCheckpoint = !!cp.lastAnalyzedAt
   if (forceSinceTs !== null) {
     sinceTs = forceSinceTs
     untilTs = forceUntilTs || Infinity
   } else {
+    const nowMs = Date.now()
     sinceTs = forceWindow
-      ? Date.now() - forceWindow * 60 * 60 * 1000
-      : (cp.lastAnalyzedAt ? new Date(cp.lastAnalyzedAt).getTime() : Date.now() - 6 * 60 * 60 * 1000)
+      ? nowMs - forceWindow * 60 * 60 * 1000
+      : (hasCheckpoint ? new Date(cp.lastAnalyzedAt).getTime() : insightDayStartMs(insightDateKey(nowMs)))
     untilTs = Infinity
   }
 
-  // Get model info for token cap
-  let models = []
-  try { models = await getCopilotModels() } catch {}
-  const chosenModel = models.find(m => m.id === modelId) || models.find(m => m.category === "versatile") || models[0]
-  // Keep bundle small (8% of context) so Copilot responds in reasonable time
-  const tokenBudget = chosenModel ? Math.floor(chosenModel.maxInputTokens * 0.08) : 6000
-  const mId = chosenModel?.id || "gpt-4o-mini"
+  // Keep bundle small (8% of context) so providers respond in reasonable time.
+  const chosenModel = await resolveInsightModel(modelId)
+  const tokenBudget = chosenModel ? Math.floor((chosenModel.maxInputTokens || 128000) * 0.08) : 6000
+  const provider = chosenModel.provider
+  const mId = chosenModel.model
 
-  // Build bundle — newest-first within the window, skip already-analyzed
-  let bundle = buildAnalysisBundle(sinceTs, tokenBudget, { excludeIds, untilTs, maxSessions })
+  // Build bundle — newest-first within the window, skip already-analyzed.
+  let bundle = preselectedBundle || buildAnalysisBundle(sinceTs, tokenBudget, { excludeIds, untilTs, maxSessions })
 
-  // If bundle is small and no explicit window, try extending backward in 3h steps
-  if (bundle.length < 2 && forceSinceTs === null) {
+  // If bundle is small and no explicit window, try extending backward in 3h steps.
+  if (!preselectedBundle && bundle.length < 2 && forceSinceTs === null && (forceWindow || hasCheckpoint)) {
     for (let ext = 1; ext <= 4 && bundle.length < 2; ext++) {
       const extSince = sinceTs - ext * 3 * 60 * 60 * 1000
       bundle = buildAnalysisBundle(extSince, tokenBudget, { excludeIds, untilTs, maxSessions })
@@ -569,25 +996,13 @@ For "improved" examples: show exactly how the OPENING user message should have b
   ]
 }`
 
-  const res = await copilotFetch(COPILOT_CHAT_URL, {
-    method: "POST",
-    body: JSON.stringify({
-      model: mId,
-      messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMsg }],
-      temperature: 0.3,
-      max_tokens: 8192,
-    }),
-    signal: AbortSignal.timeout(180000),
-  })
-  if (!res.ok) throw new Error(`Copilot analysis failed: ${res.status} ${await res.text()}`)
-  const data = await res.json()
-  const choice = data.choices?.[0]
-  const finishReason = choice?.finish_reason || "unknown"
-  const raw  = choice?.message?.content || ""
+  const modelResult = await callInsightModel(provider, mId, systemPrompt, userMsg, 8192, AbortSignal.timeout(180000))
+  const finishReason = modelResult.finishReason || "unknown"
+  const raw = modelResult.raw || ""
 
   if (!raw) {
-    const errDetail = JSON.stringify({ finish_reason: finishReason, usage: data.usage, error: data.error }).slice(0, 300)
-    throw new Error(`Copilot returned empty content (finish_reason=${finishReason}): ${errDetail}`)
+    const errDetail = JSON.stringify({ finish_reason: finishReason, usage: modelResult.usage, error: modelResult.error }).slice(0, 300)
+    throw new Error(`${chosenModel.name || mId} returned empty content (finish_reason=${finishReason}): ${errDetail}`)
   }
 
   let parsed
@@ -600,23 +1015,26 @@ For "improved" examples: show exactly how the OPENING user message should have b
     throw new Error(`Failed to parse AI response as JSON: ${raw.slice(0, 300)}`)
   }
 
-  const now = new Date().toISOString()
-  const recordDate = overrideDate || now.slice(0, 10)
+  const nowMs = Date.now()
+  const now = new Date(nowMs).toISOString()
+  const recordDate = overrideDate || insightDateKey(nowMs)
   const record = {
-    ts:   overrideDate ? (overrideDate + "T12:00:00.000Z") : now,
+    ts:   overrideDate ? new Date(insightDayStartMs(overrideDate) + 12 * 60 * 60 * 1000).toISOString() : now,
     date: recordDate,
-    model: mId,
+    provider,
+    model: chosenModel.id,
+    modelName: chosenModel.name || mId,
     score:      Math.min(10, Math.max(0, parsed.overallScore ?? 0)),
     wastePct:   Math.min(100, Math.max(0, parsed.wastePct ?? 0)),
     sessions:   bundle.length,
     summary:    parsed.summary   || "",
     patterns:   parsed.patterns  || [],
-    sessionDetails: parsed.sessions || [],
+    sessionDetails: realSessionDetails(bundle, parsed.sessions || []),
   }
 
   // Save to history; update lastAnalyzedAt only for live (non-backfill) runs
   appendInsightsRecord(record)
-  const cpUpdate = { analyzedIds: bundle.map(s => s.sessionId) }
+  const cpUpdate = { analyzedIds: bundle.map(s => s.sessionKey || analysisSessionKey(s.tool, s.sessionId)) }
   if (!overrideDate) cpUpdate.lastAnalyzedAt = now   // only advance the cursor for live runs
   if (overrideDate) cpUpdate.analyzedDates = [overrideDate]
   writeCheckpoint(cpUpdate)
@@ -624,8 +1042,8 @@ For "improved" examples: show exactly how the OPENING user message should have b
   return record
 }
 
-// ── All-time recurring themes: synthesized by Copilot, cached by record count ─
-async function getRecurringThemes() {
+// ── All-time recurring themes: synthesized by selected provider ──────────────
+async function getRecurringThemes(modelId = null) {
   const records = readInsightsHistory()
   if (!records.length) return []
 
@@ -639,10 +1057,11 @@ async function getRecurringThemes() {
   const dayCount = Object.keys(byDate).length
   const allPatterns = [...new Set(Object.values(byDate).flatMap(s => [...s]))]
 
-  // Check cache (keyed by number of unique patterns — stable proxy for history growth)
+  // Check cache (keyed by selection + unique patterns — stable proxy for history growth)
+  const selectionKey = modelId || ""
   try {
     const c = JSON.parse(fs.readFileSync(INSIGHTS_RECURRING_CACHE, "utf8"))
-    if (c.patternCount === allPatterns.length) return c.themes
+    if (c.version === INSIGHTS_HISTORY_VERSION && c.patternCount === allPatterns.length && c.selection === selectionKey) return c.themes
   } catch {}
 
   // Build prompt
@@ -650,19 +1069,20 @@ async function getRecurringThemes() {
   const prompt = `Below are ${allPatterns.length} prompt quality patterns identified across ${dayCount} days of AI coding sessions.\n\nIdentify the 5 most persistent recurring habits — themes that clearly appear many times with different phrasings. Return ONLY valid JSON: {"themes": ["<habit as short noun phrase, 4-8 words>", ...]}\n\nPatterns:\n${patternList}`
 
   try {
-    const res = await copilotFetch(COPILOT_CHAT_URL, {
-      method: "POST",
-      body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }], temperature: 0.2, max_tokens: 512 }),
-      signal: AbortSignal.timeout(30000),
-    })
-    if (!res.ok) throw new Error(`${res.status}`)
-    const data = await res.json()
-    const raw = data.choices?.[0]?.message?.content || ""
+    const chosenModel = await resolveInsightModel(modelId)
+    const raw = (await callInsightModel(
+      chosenModel.provider,
+      chosenModel.model,
+      "Return only valid JSON.",
+      prompt,
+      512,
+      AbortSignal.timeout(30000)
+    )).raw || ""
     let jsonStr = raw.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "").trim()
     jsonStr = jsonStr.match(/\{[\s\S]*\}/)?.[0] || jsonStr
     const parsed = JSON.parse(jsonStr)
     const themes = parsed.themes || []
-    fs.writeFileSync(INSIGHTS_RECURRING_CACHE, JSON.stringify({ patternCount: allPatterns.length, themes }))
+    fs.writeFileSync(INSIGHTS_RECURRING_CACHE, JSON.stringify({ version: INSIGHTS_HISTORY_VERSION, patternCount: allPatterns.length, selection: selectionKey, themes }))
     return themes
   } catch (e) {
     console.error("[recurring] synthesis error:", e.message)
@@ -673,46 +1093,26 @@ async function getRecurringThemes() {
 // ── Backfill: analyze ALL historical sessions, one day at a time ─────────────
 let _backfill = { running: false, total: 0, done: 0, skipped: 0, error: null, startedAt: null }
 
-async function runBackfillAll({ model: modelId = null } = {}) {
+async function runBackfillAll({ model: modelId = null, rebuild = false } = {}) {
   if (_backfill.running) return { error: "Backfill already running" }
   _backfill = { running: true, total: 0, done: 0, skipped: 0, error: null, startedAt: new Date().toISOString() }
 
   try {
     const cp = readCheckpoint()
-    const alreadyDone = new Set(cp.analyzedDates || [])
+    const alreadyDone = rebuild ? new Set() : new Set(cp.analyzedDates || [])
 
-    // Collect all session mtimes to find day range
-    const allMtimes = []
-    if (fs.existsSync(SESSIONS_DIR)) {
-      for (const f of fs.readdirSync(SESSIONS_DIR).filter(x => x.endsWith(".jsonl"))) {
-        try { allMtimes.push(fs.statSync(path.join(SESSIONS_DIR, f)).mtimeMs) } catch {}
-      }
-    }
-    const CLAUDE_PROJ = path.join(HOME, ".claude", "projects")
-    if (fs.existsSync(CLAUDE_PROJ)) {
-      for (const proj of fs.readdirSync(CLAUDE_PROJ)) {
-        const d = path.join(CLAUDE_PROJ, proj)
-        try {
-          if (!fs.statSync(d).isDirectory()) continue
-          for (const f of fs.readdirSync(d).filter(x => x.endsWith(".jsonl"))) {
-            try { allMtimes.push(fs.statSync(path.join(d, f)).mtimeMs) } catch {}
-          }
-        } catch {}
-      }
-    }
-
-    if (!allMtimes.length) { _backfill.running = false; return { done: 0 } }
+    // Collect actual session activity dates, not file mtimes. Full imports rewrite files today.
+    const allCandidates = collectAnalysisCandidates({ sinceTs: 0, untilTs: Infinity, excludeIds: new Set() })
+    if (!allCandidates.length) { _backfill.running = false; return { done: 0 } }
 
     // Build list of unique days (oldest first)
-    const days = [...new Set(allMtimes.map(ms => new Date(ms).toISOString().slice(0, 10)))].sort()
+    const days = [...new Set(allCandidates.flatMap(c => c.messageDates?.length ? c.messageDates : [insightDateKey(c.activityMs)]))].sort()
     _backfill.total = days.length
 
     // Get model info once
-    let models = []
-    try { models = await getCopilotModels() } catch {}
-    const chosenModel = models.find(m => m.id === modelId) || models.find(m => m.category === "versatile") || models[0]
-    const tokenBudget = chosenModel ? Math.floor(chosenModel.maxInputTokens * 0.08) : 6000
-    const mId = modelId || chosenModel?.id || "gpt-4o-mini"
+    const chosenModel = await resolveInsightModel(modelId)
+    const tokenBudget = chosenModel ? Math.floor((chosenModel.maxInputTokens || 128000) * 0.08) : 6000
+    const mId = chosenModel.id
 
     for (const day of days) {
       if (alreadyDone.has(day)) {
@@ -721,13 +1121,13 @@ async function runBackfillAll({ model: modelId = null } = {}) {
         continue
       }
 
-      const dayStart = new Date(day + "T00:00:00Z").getTime()
-      const dayEnd   = new Date(day + "T23:59:59Z").getTime()
+      const dayStart = insightDayStartMs(day)
+      const dayEnd   = insightDayEndMs(day)
 
       try {
         // Sample sessions from this day — balance across tools
         const allCands = buildAnalysisBundle(dayStart, tokenBudget * 10,  // large budget to get all candidates
-          { excludeIds: new Set(cp.analyzedIds || []), untilTs: dayEnd, maxSessions: 200 })
+          { excludeIds: rebuild ? new Set() : new Set(cp.analyzedIds || []), untilTs: dayEnd, maxSessions: 200 })
 
         if (!allCands.length) {
           console.log(`[backfill] ${day}: no sessions, skipping`)
@@ -747,7 +1147,7 @@ async function runBackfillAll({ model: modelId = null } = {}) {
         console.log(`[backfill] ${day}: ${balanced.length} sessions across tools: ${Object.keys(byTool).join(",")}`)
 
         const result = await runInsightsAnalysis({
-          model: mId, overrideDate: day, sinceTs: dayStart, untilTs: dayEnd, maxSessions: 3
+          model: mId, overrideDate: day, sinceTs: dayStart, untilTs: dayEnd, maxSessions: balanced.length, preselectedBundle: balanced
         })
         if (result) {
           console.log(`[backfill] ${day}: score ${result.score}/10, ${result.sessions} sessions`)
@@ -778,6 +1178,7 @@ function scheduleInsightsCron() {
       const lastRun = cp.lastAnalyzedAt ? new Date(cp.lastAnalyzedAt).getTime() : 0
       if (Date.now() - lastRun >= INSIGHTS_INTERVAL) {
         console.log("[insights] Running scheduled 6h analysis…")
+        syncBeforeInsights()
         const result = await runInsightsAnalysis()
         if (result) console.log(`[insights] Done — score ${result.score}/10, ${result.sessions} sessions`)
         else        console.log("[insights] No new sessions to analyze")
@@ -1271,17 +1672,26 @@ function buildContextFile(messages, ctxPath, fromTool) {
 }
 
 function portSession(sessionId, fromTool, toTool, targetDir) {
+  assertTool(fromTool)
+  assertTool(toTool)
+  if (!isSafeSessionId(sessionId)) throw new Error("Invalid session id")
   const srcFile = path.join(SESSIONS_DIR, `${fromTool}-${sessionId}.jsonl`)
   const messages = readJSONL(srcFile)
   if (!messages.length) throw new Error("Source session empty or not found")
 
-  const dirs     = loadDirs()
-  const sourceDir = targetDir || dirs[`${fromTool}-${sessionId}`] || process.env.HOME
-  const newId    = toTool === "claude" ? genUUID() : genSessionId()
+  const dirs = loadDirs()
+  const requestedDir = targetDir || dirs[`${fromTool}-${sessionId}`] || process.env.HOME
+  let sourceDir
+  try {
+    sourceDir = validateTargetDir(requestedDir)
+  } catch (e) {
+    if (targetDir) throw e
+    sourceDir = HOME
+  }
+  const newId = toTool === "claude" ? genUUID() : genSessionId()
 
   // Inject into target tool's native storage
   if (toTool === "opencode") {
-    injectClaudeCode(messages, newId, sourceDir)
     injectOpenCode(messages, newId, sourceDir)
   } else if (toTool === "codex") {
     injectCodex(messages, newId)
@@ -1343,6 +1753,20 @@ function runImport(tool, full = false) {
   return JSON.parse(out.trim())
 }
 
+function importedCount(importResult) {
+  return Object.values(importResult || {}).reduce((total, result) => {
+    return total + (Number.isFinite(result?.imported) ? result.imported : 0)
+  }, 0)
+}
+
+function syncBeforeInsights() {
+  const result = runImport("all", false)
+  const imported = importedCount(result)
+  const warnings = Object.values(result || {}).filter(r => r?.error).length
+  console.log(`[insights] Pre-sync complete: imported ${imported}${warnings ? `, ${warnings} tool warning(s)` : ""}`)
+  return { result, imported }
+}
+
 function getSyncState() {
   if (!fs.existsSync(SYNC_STATE)) return {}
   try { return JSON.parse(fs.readFileSync(SYNC_STATE, "utf8")) } catch { return {} }
@@ -1350,22 +1774,81 @@ function getSyncState() {
 
 // ── router ────────────────────────────────────────────────────────────────────
 
-function respond(res, status, body) {
+function allowedOrigin(req) {
+  const origin = req.headers.origin
+  if (!origin) return null
+  try {
+    const u = new URL(origin)
+    const localHost = ["localhost", "127.0.0.1", "::1"].includes(u.hostname)
+    const samePort = !u.port || u.port === String(PORT)
+    return localHost && samePort ? origin : null
+  } catch {
+    return null
+  }
+}
+
+function jsonHeaders(req) {
+  const headers = { "Content-Type": "application/json" }
+  const origin = allowedOrigin(req)
+  if (origin) {
+    headers["Access-Control-Allow-Origin"] = origin
+    headers["Vary"] = "Origin"
+  }
+  return headers
+}
+
+function respond(res, status, body, req = null) {
   const json = JSON.stringify(body)
-  res.writeHead(status, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" })
+  res.writeHead(status, req ? jsonHeaders(req) : { "Content-Type": "application/json" })
   res.end(json)
 }
 
+function rejectUntrustedApi(req, res) {
+  if (req.headers.origin && !allowedOrigin(req)) {
+    respond(res, 403, { error: "Forbidden origin" }, req)
+    return true
+  }
+  if (req.headers["x-axon-token"] !== UI_TOKEN) {
+    respond(res, 403, { error: "Forbidden" }, req)
+    return true
+  }
+  return false
+}
+
 function parseBody(req) {
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     let b = ""
-    req.on("data", c => b += c)
-    req.on("end", () => { try { resolve(JSON.parse(b)) } catch { resolve({}) } })
+    req.on("data", c => {
+      b += c
+      if (b.length > 1024 * 1024) {
+        req.destroy()
+        reject(new Error("Request body too large"))
+      }
+    })
+    req.on("end", () => { try { resolve(b ? JSON.parse(b) : {}) } catch { resolve({}) } })
+    req.on("error", reject)
   })
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://localhost:${PORT}`)
+  const url = new URL(req.url, `http://${HOST}:${PORT}`)
+
+  if (req.method === "OPTIONS") {
+    if (req.headers.origin && !allowedOrigin(req)) {
+      res.writeHead(403).end()
+      return
+    }
+    const headers = {
+      ...jsonHeaders(req),
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type,X-Axon-Token",
+      "Access-Control-Max-Age": "600",
+    }
+    res.writeHead(204, headers).end()
+    return
+  }
+
+  if (url.pathname.startsWith("/api/") && rejectUntrustedApi(req, res)) return
 
   // sessions list
   if (url.pathname === "/api/sessions" && req.method === "GET") {
@@ -1376,6 +1859,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname.startsWith("/api/sessions/") && req.method === "GET") {
     const id   = url.pathname.split("/").pop()
     const tool = url.searchParams.get("tool")
+    if (!TOOL_KEYS.has(tool) || !isSafeSessionId(id)) return respond(res, 400, { error: "Invalid session" })
     const file = path.join(SESSIONS_DIR, `${tool}-${id}.jsonl`)
     if (!fs.existsSync(file)) return respond(res, 404, { error: "Not found" })
     const msgs       = readJSONL(file)
@@ -1424,6 +1908,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/import" && req.method === "POST") {
     const { tool, full } = await parseBody(req)
     if (!tool) return respond(res, 400, { error: "tool required" })
+    if (tool !== "all" && !TOOL_KEYS.has(tool)) return respond(res, 400, { error: "Unknown tool" })
     try {
       const result = runImport(tool, !!full)
       respond(res, 200, result)
@@ -1436,6 +1921,15 @@ const server = http.createServer(async (req, res) => {
   // sync state (last import timestamps)
   if (url.pathname === "/api/sync-state" && req.method === "GET") {
     return respond(res, 200, getSyncState())
+  }
+
+  // ── MCP usage/hit audit ─────────────────────────────────────────────────
+  if (url.pathname === "/api/mcp/hits" && req.method === "GET") {
+    try {
+      return respond(res, 200, summarizeMcpHits())
+    } catch (e) {
+      return respond(res, 500, { error: e.message })
+    }
   }
 
   // ── MCP status: which tools have it installed ─────────────────────────────
@@ -1806,8 +2300,14 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/insights/backfill/start" && req.method === "POST") {
     if (_backfill.running) return respond(res, 200, { status: "already_running", ..._backfill })
     const model = url.searchParams.get("model") || null
-    runBackfillAll({ model }).catch(e => console.error("[backfill] unhandled:", e.message))
-    return respond(res, 200, { status: "started" })
+    const rebuild = url.searchParams.get("rebuild") === "1"
+    try {
+      const sync = syncBeforeInsights()
+      runBackfillAll({ model, rebuild }).catch(e => console.error("[backfill] unhandled:", e.message))
+      return respond(res, 200, { status: "started", sync: sync.result })
+    } catch (e) {
+      return respond(res, 500, { error: `Sync before backfill failed: ${e.message}` })
+    }
   }
 
   if (url.pathname === "/api/insights/backfill/status" && req.method === "GET") {
@@ -1815,8 +2315,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === "/api/insights/recurring-themes" && req.method === "GET") {
+    const model = url.searchParams.get("model") || null
     try {
-      const themes = await getRecurringThemes()
+      const themes = await getRecurringThemes(model)
       return respond(res, 200, { themes })
     } catch (e) {
       return respond(res, 500, { error: e.message })
@@ -1888,6 +2389,14 @@ const server = http.createServer(async (req, res) => {
     } catch (e) { return respond(res, 500, { error: e.message }) }
   }
 
+  // ── Insights providers and models ─────────────────────────────────────────
+  if (url.pathname === "/api/insights/models" && req.method === "GET") {
+    try {
+      const data = await getInsightModels()
+      return respond(res, 200, data)
+    } catch (e) { return respond(res, 200, { providers: [], models: [], error: e.message }) }
+  }
+
   // ── Copilot models list ───────────────────────────────────────────────────
   if (url.pathname === "/api/copilot/models" && req.method === "GET") {
     try {
@@ -1901,15 +2410,16 @@ const server = http.createServer(async (req, res) => {
     const refresh = url.searchParams.get("refresh") === "1"
     const model   = url.searchParams.get("model") || null
     try {
-      if (!refresh && fs.existsSync(INSIGHTS_CACHE)) {
+      const sync = syncBeforeInsights()
+      if (!refresh && sync.imported === 0 && fs.existsSync(INSIGHTS_CACHE)) {
         try {
           const c = JSON.parse(fs.readFileSync(INSIGHTS_CACHE, "utf8"))
-          if (Date.now() - c._ts < INSIGHTS_TTL) { delete c._ts; return respond(res, 200, c) }
+          if (c._version === INSIGHTS_HISTORY_VERSION && Date.now() - c._ts < INSIGHTS_TTL && c._selection === (model || "")) { delete c._ts; delete c._selection; delete c._version; return respond(res, 200, c) }
         } catch {}
       }
       const result = await runInsightsAnalysis({ forceWindow: null, model })
       if (result) {
-        try { fs.writeFileSync(INSIGHTS_CACHE, JSON.stringify({ ...result, _ts: Date.now() })) } catch {}
+        try { fs.writeFileSync(INSIGHTS_CACHE, JSON.stringify({ ...result, _ts: Date.now(), _selection: model || "", _version: INSIGHTS_HISTORY_VERSION })) } catch {}
       }
       return respond(res, 200, result || { error: "No session data found in recent history" })
     } catch (e) { return respond(res, 500, { error: e.message }) }
@@ -1919,20 +2429,34 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/insights-history" && req.method === "GET") {
     try {
       const records = readInsightsHistory()
-      return respond(res, 200, { records })
+      return respond(res, 200, { records, legacyRecords: countLegacyInsightsRecords() })
     } catch (e) { return respond(res, 500, { error: e.message }) }
+  }
+
+  if (url.pathname.startsWith("/api/")) {
+    return respond(res, 404, { error: "Unknown API endpoint" }, req)
   }
 
   // static files
   let filePath = path.join(__dirname, "public", url.pathname === "/" ? "index.html" : url.pathname)
   if (!fs.existsSync(filePath)) filePath = path.join(__dirname, "public", "index.html")
   const ext = path.extname(filePath)
+  if (path.basename(filePath) === "index.html") {
+    const escapeInjectedString = value => JSON.stringify(String(value)).slice(1, -1)
+    const html = fs.readFileSync(filePath, "utf8")
+      .replace("__AXON_UI_TOKEN__", escapeInjectedString(UI_TOKEN))
+      .replace("__MCP_SERVER_PATH__", escapeInjectedString(MCP_SERVER))
+    res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" })
+    res.end(html)
+    return
+  }
   res.writeHead(200, { "Content-Type": MIME[ext] ?? "text/plain" })
   fs.createReadStream(filePath).pipe(res)
 })
 
-server.listen(PORT, () => {
-  console.log(`axon UI → http://localhost:${PORT}`)
+server.listen(PORT, HOST, () => {
+  console.log(`axon UI → http://${HOST}:${PORT}`)
   console.log(`Sessions dir: ${SESSIONS_DIR}`)
-  scheduleInsightsCron()
+  if (ENABLE_INSIGHTS_CRON) scheduleInsightsCron()
+  else console.log("Insights cron disabled (set AXON_INSIGHTS_CRON=1 to enable)")
 })

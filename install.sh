@@ -19,7 +19,7 @@ hdr()  { echo -e "\n${DIM}[$*]${NC}"; }
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 patch_json() {
-  # patch_json <file> <python-expr-returning-dict>
+  # patch_json <file> <json-patch>
   # Creates file if missing, deep-merges the patch
   local file="$1" patch="$2"
   python3 - "$file" "$patch" <<'PY'
@@ -49,7 +49,7 @@ def deep_merge(base, override):
             base[k] = v
     return base
 
-patch = eval(patch_code)
+patch = json.loads(patch_code)
 result = deep_merge(existing, patch)
 
 os.makedirs(os.path.dirname(os.path.abspath(file)), exist_ok=True)
@@ -61,13 +61,20 @@ PY
 
 json_has() {
   # json_has <file> <python-bool-expr>
-  python3 -c "
+  local file="$1" expr="$2"
+  python3 - "$file" "$expr" <<'PY' 2>/dev/null
 import json, sys, os
-if not os.path.exists('$1'):
+file, expr = sys.argv[1], sys.argv[2]
+if not os.path.exists(file):
     sys.exit(1)
-d = json.load(open('$1'))
-sys.exit(0 if ($2) else 1)
-" 2>/dev/null
+try:
+    with open(file) as f:
+        d = json.load(f)
+except Exception:
+    sys.exit(1)
+allowed_builtins = {"any": any, "all": all, "len": len}
+sys.exit(0 if eval(expr, {"__builtins__": allowed_builtins}, {"d": d}) else 1)
+PY
 }
 
 # ── Claude Code ───────────────────────────────────────────────────────────────
