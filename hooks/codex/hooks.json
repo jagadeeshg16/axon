@@ -1,0 +1,8 @@
+{
+  "Stop": [
+    {
+      "type": "command",
+      "command": "INSTALL_DIR/hooks/codex/on-stop.sh"
+    }
+  ]
+}

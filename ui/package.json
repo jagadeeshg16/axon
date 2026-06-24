@@ -1,0 +1,9 @@
+{
+  "name": "axon-ui",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "PORT=4242 node --watch server.js"
+  }
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=axon - AI conversation bridge UI
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=INSTALL_DIR/ui
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+Environment=PORT=4242
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

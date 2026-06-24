@@ -1,0 +1,4 @@
+{
+  "event": "sessionEnd",
+  "run": "INSTALL_DIR/hooks/copilot/on-session-end.sh"
+}
