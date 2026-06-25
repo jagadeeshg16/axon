@@ -2433,6 +2433,69 @@ const server = http.createServer(async (req, res) => {
     } catch (e) { return respond(res, 500, { error: e.message }) }
   }
 
+  // ── Graph data ───────────────────────────────────────────────────────────────
+  if (url.pathname === "/api/graph" && req.method === "GET") {
+    try {
+      const dirs = loadDirs()
+      const sessions = []
+      if (fs.existsSync(SESSIONS_DIR)) {
+        for (const f of fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith(".jsonl"))) {
+          const [tool, ...rest] = f.replace(".jsonl", "").split("-")
+          const id = rest.join("-")
+          if (!TOOL_KEYS.has(tool)) continue
+          const fpath = path.join(SESSIONS_DIR, f)
+          const msgs  = readJSONL(fpath)
+          if (!msgs.length) continue
+          const first  = msgs[0]
+          const last   = msgs[msgs.length - 1]
+          const dir    = dirs[`${tool}-${id}`] ?? null
+          const preview = (msgs.find(m => m.role === "user")?.content ?? first.content ?? "").slice(0, 100)
+          sessions.push({ id, tool, dir, preview, message_count: msgs.length, ts: first.ts, last_ts: last?.ts ?? first.ts })
+        }
+      }
+
+      const nodes = []
+      const edges = []
+      const projectMap = new Map() // dir path → node id
+
+      for (const s of sessions) {
+        if (s.dir && !projectMap.has(s.dir)) {
+          const projId = `proj:${s.dir}`
+          projectMap.set(s.dir, projId)
+          nodes.push({ id: projId, type: "project", label: path.basename(s.dir), path: s.dir })
+        }
+      }
+
+      const sessionsByGroup = {}
+      for (const s of sessions) {
+        const nodeId = `sess:${s.tool}:${s.id}`
+        nodes.push({
+          id: nodeId, type: "session",
+          tool: s.tool, session_id: s.id,
+          label: s.preview.slice(0, 60),
+          ts: s.ts, last_ts: s.last_ts,
+          message_count: s.message_count,
+          dir: s.dir,
+        })
+        if (s.dir && projectMap.has(s.dir)) {
+          edges.push({ source: nodeId, target: projectMap.get(s.dir), type: "belongs_to" })
+        }
+        const dayKey   = (s.ts ?? "").slice(0, 10) || "unknown"
+        const groupKey = `${s.dir ?? ""}::${dayKey}`
+        if (!sessionsByGroup[groupKey]) sessionsByGroup[groupKey] = []
+        sessionsByGroup[groupKey].push(nodeId)
+      }
+
+      for (const nodeIds of Object.values(sessionsByGroup)) {
+        for (let i = 0; i < nodeIds.length - 1; i++) {
+          edges.push({ source: nodeIds[i], target: nodeIds[i + 1], type: "temporal" })
+        }
+      }
+
+      return respond(res, 200, { nodes, edges })
+    } catch (e) { return respond(res, 500, { error: e.message }) }
+  }
+
   if (url.pathname.startsWith("/api/")) {
     return respond(res, 404, { error: "Unknown API endpoint" }, req)
   }

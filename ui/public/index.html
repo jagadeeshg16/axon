@@ -385,6 +385,36 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
 #toast.show{opacity:1;transform:translateY(0)}
 #toast.err{border-color:#c0404a;color:#ff7080}
 .tok{color:var(--codex)}
+/* ── GRAPH PAGE ── */
+#page-graph{flex-direction:column;overflow:hidden}
+#graph-toolbar{display:flex;align-items:center;gap:6px;padding:8px 14px;background:var(--s1);border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap}
+#graph-toolbar .ftab{font-size:10px;padding:3px 10px}
+#graph-node-count{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--dim)}
+#graph-wrap{flex:1;display:flex;min-height:0;position:relative}
+#graph-canvas{flex:1;background:var(--s1);position:relative;overflow:hidden}
+#graph-canvas svg{width:100%;height:100%}
+#graph-info{width:280px;background:var(--s2);border-left:1px solid var(--border);overflow-y:auto;flex-shrink:0;display:none;flex-direction:column;padding:14px}
+#graph-info.visible{display:flex}
+#graph-info::-webkit-scrollbar{width:3px}
+#graph-info::-webkit-scrollbar-thumb{background:var(--border2)}
+.gi-close{position:absolute;top:10px;right:10px;background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;padding:2px 6px}
+.gi-close:hover{color:var(--text)}
+.gi-badge{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:9px;padding:2px 6px;border-radius:3px;margin-bottom:8px}
+.gi-title{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text);word-break:break-all;margin-bottom:4px}
+.gi-dir{font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:8px;word-break:break-all}
+.gi-preview{font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:12px;border-left:2px solid var(--border2);padding-left:8px}
+.gi-meta{display:flex;flex-direction:column;gap:4px;font-family:var(--mono);font-size:10px;color:var(--dim);margin-bottom:12px}
+.gi-open-btn{font-family:var(--mono);font-size:10px;padding:5px 10px;background:var(--s3);border:1px solid var(--border2);border-radius:5px;color:var(--text);cursor:pointer;text-align:center}
+.gi-open-btn:hover{border-color:var(--muted);color:var(--text)}
+.gi-proj-title{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px;word-break:break-all}
+.gi-proj-path{font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:10px;word-break:break-all}
+.gi-proj-count{font-family:var(--mono);font-size:10px;color:var(--dim)}
+#graph-legend{position:absolute;bottom:12px;left:14px;display:flex;flex-direction:column;gap:4px;pointer-events:none}
+.gl-item{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;color:var(--muted)}
+.gl-dot{width:8px;height:8px;border-radius:50%}
+.gl-proj{width:14px;height:14px;border-radius:50%;background:#555}
+#graph-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;font-family:var(--mono);font-size:12px;color:var(--dim);pointer-events:none}
+#graph-empty.hidden{display:none}
 </style>
 </head>
 <body>
@@ -399,6 +429,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
       <button class="nav-tab exp" data-page="port"    onclick="showPage('port')">Port</button>
       <button class="nav-tab"    data-page="usage"    onclick="showPage('usage')">Usage</button>
       <button class="nav-tab"    data-page="insights" onclick="showPage('insights')">Insights</button>
+      <button class="nav-tab"    data-page="graph"    onclick="showPage('graph')">Graph</button>
       <button class="nav-tab"    data-page="settings" onclick="showPage('settings')">Settings</button>
     </div>
     <div class="live-dot"></div>
@@ -732,6 +763,24 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
       </div>
     </div>
 
+    <!-- ══ GRAPH PAGE ══ -->
+    <div class="page" id="page-graph" style="display:none;flex-direction:column">
+      <div id="graph-toolbar">
+        <button class="ftab on" data-gt="all"      onclick="gfilt('all')">ALL</button>
+        <button class="ftab" data-gt="claude"      onclick="gfilt('claude')">● CL</button>
+        <button class="ftab" data-gt="opencode"    onclick="gfilt('opencode')">● OC</button>
+        <button class="ftab" data-gt="codex"       onclick="gfilt('codex')">● CD</button>
+        <button class="ftab" data-gt="copilot"     onclick="gfilt('copilot')">● GH</button>
+        <span id="graph-node-count"></span>
+      </div>
+      <div id="graph-wrap">
+        <div id="graph-canvas">
+          <div id="graph-empty"><span>○</span><span>no sessions to display</span></div>
+        </div>
+        <div id="graph-info"></div>
+      </div>
+    </div>
+
     <!-- ══ SETTINGS PAGE ══ -->
     <div class="page" id="page-settings" style="display:none;overflow-y:auto;flex-direction:column">
       <div class="settings-inner">
@@ -805,6 +854,22 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--u
 <div id="toast"></div>
 
 <script>
+// D3 is loaded lazily when the Graph tab is first visited (loadGraph injects the script tag)
+let _d3LoadPromise = null
+function loadD3() {
+  if (window.d3) return Promise.resolve()
+  if (_d3LoadPromise) return _d3LoadPromise
+  _d3LoadPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script')
+    s.src = 'https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js'
+    s.crossOrigin = 'anonymous'
+    s.onload = resolve
+    s.onerror = () => reject(new Error('Failed to load D3 — check your internet connection'))
+    document.head.appendChild(s)
+  })
+  return _d3LoadPromise
+}
+
 const T={
   claude:{label:'Claude Code',s:'CL',c:'var(--claude)'},
   opencode:{label:'OpenCode',s:'OC',c:'var(--opencode)'},
@@ -819,12 +884,13 @@ let S={
   mcp:{filter:'all', active:null, msgs:[], ports:[]},
   port:{filter:'all', active:null, msgs:[], ports:[]},
   feedHistory:{},
+  graph:{activeTools:new Set(["claude","opencode","codex","copilot"]),selectedNode:null,data:null},
 }
 
 let ACTIVE_PAGE="mcp"
 let _sessionShellPromise=null
-const PAGE_LABELS={mcp:"MCP",port:"Port",usage:"Usage",insights:"Insights",settings:"Settings"}
-const PREFETCH={mcp:null,port:null,usage:null,insights:null,settings:null}
+const PAGE_LABELS={mcp:"MCP",port:"Port",usage:"Usage",insights:"Insights",graph:"Graph",settings:"Settings"}
+const PREFETCH={mcp:null,port:null,usage:null,insights:null,graph:null,settings:null}
 
 function rt(ts){const d=Date.now()-new Date(ts).getTime(),m=~~(d/6e4),h=~~(m/60),dy=~~(h/24);return m<1?'now':m<60?`${m}m`:h<24?`${h}h`:`${dy}d`}
 function sd(ts){return new Date(ts).toLocaleDateString('en',{month:'short',day:'numeric'})}
@@ -878,6 +944,7 @@ function prefetchPage(page,{force=false}={}){
       if(page==="mcp"||page==="port")return await loadSessionShell(force)
       if(page==="usage")return await loadUsage(force)
       if(page==="insights")return await loadInsights({loadRecurring:false})
+      if(page==="graph")return await loadGraph(force)
       if(page==="settings")return await loadSettings()
     }catch(e){
       if(ACTIVE_PAGE===page)toast(`${label} load failed: ${e.message}`,"err")
@@ -919,6 +986,11 @@ function showPage(page){
   }
   document.querySelector(`.nav-tab[data-page=${page}]`)?.classList.add("on")
   if(page==="port") checkExpOverlay()
+  if(page==="graph"){
+    // resize simulation to new canvas dimensions when tab becomes visible
+    const canvas=document.getElementById("graph-canvas")
+    if(canvas&&_graphSimulation)_graphSimulation.alpha(0.1).restart()
+  }
   prefetchPage(page).then(()=>{
     if(page==="insights"&&ACTIVE_PAGE==="insights"&&_insAllRecords.length)renderInsightsRecurring()
   }).catch(()=>{})
@@ -2097,6 +2169,216 @@ async function doImport(tool){
     renderSyncState(state);renderList('mcp');renderList('port')
   }catch(e){toast(e.message,'err')}
   finally{document.querySelectorAll('.ib').forEach(b=>b.disabled=false);if(btn&&orig)btn.innerHTML=orig}
+}
+
+// ── Graph ─────────────────────────────────────────────────────────────────────
+let _graphSimulation = null
+
+function gfilt(tool){
+  if(tool==='all'){
+    S.graph.activeTools=new Set(["claude","opencode","codex","copilot"])
+  } else {
+    // Toggle single tool
+    if(S.graph.activeTools.has(tool)&&S.graph.activeTools.size>1){
+      S.graph.activeTools.delete(tool)
+    } else {
+      S.graph.activeTools=new Set([tool])
+    }
+  }
+  // Update button states
+  const all=S.graph.activeTools.size===4
+  document.querySelectorAll('#graph-toolbar .ftab').forEach(b=>{
+    if(b.dataset.gt==='all') b.classList.toggle('on',all)
+    else b.classList.toggle('on',!all&&S.graph.activeTools.has(b.dataset.gt))
+  })
+  if(S.graph.data) renderGraph(S.graph.data)
+}
+
+async function loadGraph(force=false){
+  const canvas=document.getElementById('graph-canvas')
+  if(!canvas) return
+  try {
+    await loadD3()
+  } catch(e) {
+    canvas.innerHTML=`<div id="graph-empty"><span>⚠</span><span>${esc(e.message)}</span></div>`
+    return
+  }
+  const data = await api('/api/graph')
+  S.graph.data = data
+  renderGraph(data)
+  return data
+}
+
+const TOOL_COLORS={claude:'#FF6525',opencode:'#00D4FF',codex:'#39FF14',copilot:'#D946EF'}
+
+function renderGraph(data){
+  const canvas=document.getElementById('graph-canvas')
+  if(!canvas) return
+  const infoPanel=document.getElementById('graph-info')
+
+  // Filter by active tools
+  const active=S.graph.activeTools
+  const filteredNodes=data.nodes.filter(n=>n.type==='project'||active.has(n.tool))
+  const filteredIds=new Set(filteredNodes.map(n=>n.id))
+  const filteredEdges=data.edges.filter(e=>filteredIds.has(e.source)&&filteredIds.has(e.target))
+
+  // Update node count
+  const sessCount=filteredNodes.filter(n=>n.type==='session').length
+  const projCount=filteredNodes.filter(n=>n.type==='project').length
+  const countEl=document.getElementById('graph-node-count')
+  if(countEl) countEl.textContent=`${sessCount} sessions · ${projCount} projects`
+
+  const emptyEl=document.getElementById('graph-empty')
+  if(emptyEl) emptyEl.classList.toggle('hidden', filteredNodes.length>0)
+
+  // Clear canvas
+  canvas.querySelectorAll('svg').forEach(s=>s.remove())
+  if(!filteredNodes.length) return
+
+  const W=canvas.clientWidth||800
+  const H=canvas.clientHeight||600
+
+  const svg=d3.select(canvas).append('svg')
+    .attr('width','100%').attr('height','100%')
+
+  const defs=svg.append('defs')
+  // Glow filter
+  const glowFilter=defs.append('filter').attr('id','glow').attr('x','-50%').attr('y','-50%').attr('width','200%').attr('height','200%')
+  glowFilter.append('feGaussianBlur').attr('stdDeviation','3').attr('result','coloredBlur')
+  const feMerge=glowFilter.append('feMerge')
+  feMerge.append('feMergeNode').attr('in','coloredBlur')
+  feMerge.append('feMergeNode').attr('in','SourceGraphic')
+
+  const g=svg.append('g')
+
+  svg.call(d3.zoom().scaleExtent([0.05,8]).on('zoom',(event)=>{
+    g.attr('transform',event.transform)
+  }))
+
+  // Shallow-copy nodes/links for simulation (D3 mutates them)
+  const simNodes=filteredNodes.map(n=>({...n}))
+  const nodeById=new Map(simNodes.map(n=>[n.id,n]))
+  const simLinks=filteredEdges.flatMap(e=>{
+    const src=nodeById.get(typeof e.source==='object'?e.source.id:e.source)
+    const tgt=nodeById.get(typeof e.target==='object'?e.target.id:e.target)
+    if(!src||!tgt)return []
+    return [{source:src,target:tgt,type:e.type}]
+  })
+
+  // Draw edges
+  const link=g.append('g').attr('class','links').selectAll('line')
+    .data(simLinks).join('line')
+    .attr('stroke',d=>d.type==='belongs_to'?'rgba(255,255,255,0.18)':'rgba(255,255,255,0.06)')
+    .attr('stroke-width',d=>d.type==='belongs_to'?1:0.5)
+    .attr('stroke-dasharray',d=>d.type==='temporal'?'3,4':null)
+
+  // Draw nodes
+  const nodeGroup=g.append('g').attr('class','nodes').selectAll('g')
+    .data(simNodes).join('g')
+    .attr('cursor','pointer')
+    .call(d3.drag()
+      .on('start',(event,d)=>{if(!event.active)sim.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y})
+      .on('drag', (event,d)=>{d.fx=event.x;d.fy=event.y})
+      .on('end',  (event,d)=>{if(!event.active)sim.alphaTarget(0);d.fx=null;d.fy=null})
+    )
+    .on('click',(event,d)=>showNodeInfo(d))
+
+  // Node circles
+  nodeGroup.append('circle')
+    .attr('r',d=>d.type==='project'?16:7)
+    .attr('fill',d=>{
+      if(d.type==='project')return '#333'
+      return TOOL_COLORS[d.tool]||'#888'
+    })
+    .attr('stroke',d=>d.type==='project'?'#555':'rgba(0,0,0,0.4)')
+    .attr('stroke-width',d=>d.type==='project'?1.5:1)
+    .attr('filter',d=>d.type==='session'?'url(#glow)':null)
+    .style('opacity',0.9)
+
+  // Project labels (always visible)
+  nodeGroup.filter(d=>d.type==='project').append('text')
+    .attr('text-anchor','middle').attr('dy','26px')
+    .attr('fill','#666').attr('font-size','9px').attr('font-family','var(--mono)')
+    .attr('pointer-events','none')
+    .text(d=>d.label.slice(0,18))
+
+  // Simulation
+  if(_graphSimulation) _graphSimulation.stop()
+  const sim=d3.forceSimulation(simNodes)
+    .force('link',d3.forceLink(simLinks).distance(d=>d.type==='belongs_to'?60:30).strength(d=>d.type==='belongs_to'?1:0.3))
+    .force('charge',d3.forceManyBody().strength(d=>d.type==='project'?-300:-80))
+    .force('center',d3.forceCenter(W/2,H/2))
+    .force('collide',d3.forceCollide().radius(d=>d.type==='project'?22:12))
+    .on('tick',()=>{
+      link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+          .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y)
+      nodeGroup.attr('transform',d=>`translate(${d.x},${d.y})`)
+    })
+  _graphSimulation=sim
+
+  // Legend
+  let legend=canvas.querySelector('#graph-legend')
+  if(!legend){
+    legend=document.createElement('div')
+    legend.id='graph-legend'
+    canvas.appendChild(legend)
+  }
+  const legendItems=[
+    {color:'#333',label:'Project',shape:'proj'},
+    ...Object.entries(TOOL_COLORS).filter(([t])=>active.has(t)).map(([t,c])=>({color:c,label:T[t]?.s||t}))
+  ]
+  legend.innerHTML=legendItems.map(item=>
+    item.shape==='proj'
+      ? `<div class="gl-item"><div class="gl-proj"></div><span>${item.label}</span></div>`
+      : `<div class="gl-item"><div class="gl-dot" style="background:${item.color}"></div><span>${item.label}</span></div>`
+  ).join('')
+}
+
+function showNodeInfo(d){
+  const panel=document.getElementById('graph-info')
+  if(!panel) return
+  S.graph.selectedNode=d
+  panel.classList.add('visible')
+
+  if(d.type==='project'){
+    panel.innerHTML=`
+      <button class="gi-close" onclick="closeGraphInfo()">✕</button>
+      <div class="gi-proj-title">${esc(d.label)}</div>
+      <div class="gi-proj-path">${esc(d.path)}</div>
+      <div class="gi-proj-count">project directory</div>
+    `
+    return
+  }
+
+  const toolColor=TOOL_COLORS[d.tool]||'#888'
+  const toolLabel=T[d.tool]?.label||d.tool
+  const ts=(d.ts||'').slice(0,10)
+  panel.innerHTML=`
+    <button class="gi-close" onclick="closeGraphInfo()">✕</button>
+    <div class="gi-badge badge ${d.tool}">${esc(T[d.tool]?.s||d.tool)} · ${esc(ts)}</div>
+    <div class="gi-title">${esc(d.session_id)}</div>
+    <div class="gi-dir">${esc(d.dir||'unknown')}</div>
+    <div class="gi-preview">${esc(d.label)}</div>
+    <div class="gi-meta">
+      <span>${d.message_count} messages</span>
+      ${d.last_ts?`<span>last: ${esc((d.last_ts||'').slice(0,10))}</span>`:''}
+    </div>
+    <button class="gi-open-btn" onclick="openSessionFromGraph(${JSON.stringify(d.session_id)},${JSON.stringify(d.tool)})">Open in Sessions →</button>
+  `
+}
+
+function closeGraphInfo(){
+  const panel=document.getElementById('graph-info')
+  if(panel){panel.classList.remove('visible');panel.innerHTML=''}
+  S.graph.selectedNode=null
+}
+
+function openSessionFromGraph(id,tool){
+  closeGraphInfo()
+  showPage('mcp')
+  prefetchPage('mcp').then(()=>{
+    sel('mcp',id,tool).catch(e=>toast(e.message,'err'))
+  }).catch(()=>{})
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
